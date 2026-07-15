@@ -1,0 +1,41 @@
+--- user 2026-07-13 07:39:03
+Build a production-ready Calendar Dashboard using React, TypeScript, Tailwind CSS, and Vite.
+
+Requirements:
+
+## Tech Stack
+- React 19
+- TypeScript
+- Tailwind CSS
+- dayjs for date manipulation
+- Lucide React icons
+- Framer Motion for animations
+- React Hook Form for forms
+- Context API or Zustand for state management
+
+Project must follow scalable architecture.
+
+src/
+ ├── components/
+ │    ├── calendar/
+ │    ├── events/
+ │    ├── modals/
+ │    ├── ui/
+ │    └── layout/
+ ├── pages/
+ ├── hooks/
+ ├─
+
+--- assistant 2026-07-13 07:39:03
+I'll create the following components, pages, and features for the Calendar Dashboard:
+
+### Components:
+- **Calendar**: Displays month, week, and day views.
+- **EventList**: Shows list of events for selected date.
+- **Modal**: For adding/editing/deleting events.
+- **Sidebar**: Includes mini calendar, today's date, categories, filters, search.
+- **TopNavigation**: Search bar, notifications, settings, profile avatar.
+
+### Pages:
+- **Dashboard**: Main page with today's events, upcoming events, pendi
+
