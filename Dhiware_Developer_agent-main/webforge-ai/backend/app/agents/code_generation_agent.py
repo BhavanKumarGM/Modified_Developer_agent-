@@ -1,13 +1,10 @@
 """Generates new files, components, pages, and APIs from structured plans."""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, AsyncIterator
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
 from app.core.llm_service import LLMService
-
 
 SYSTEM_PROMPT = """You are the Code Generation Agent for WebForge AI.
 
@@ -46,6 +43,7 @@ class CodeGenerationAgent(BaseAgent):
     async def run(self, task: str, context: AgentContext, **kwargs: Any) -> AgentResult:
         self._log_task(task)
         plan_data = kwargs.get("plan", {})
+        memory_section = self._format_memory(context.metadata)
 
         prompt = f"""Generate the React source code for:
 
@@ -57,7 +55,7 @@ Requirements:
 - Generate ALL necessary src/ components, pages, hooks, and utilities
 - src/App.tsx is the root — it must render the full application
 - Every file must be complete and self-contained
-
+{memory_section}
 Output ONLY the JSON object. Start with {{ and end with }}."""
 
         request = self._build_request(
@@ -99,22 +97,6 @@ Be specific. Then write "⚡ Generating files now…" on a new line."""
         )
         async for token in self.llm.stream(request):
             yield token
-
-    def _extract_json(self, text: str) -> dict:
-        # Try the full text first
-        text = text.strip()
-        if text.startswith("{"):
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                pass
-
-        # Try to find JSON block
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-
-        raise ValueError("No valid JSON found in response")
 
     def _ensure_critical_files(self, files: list[dict]) -> list[dict]:
         """

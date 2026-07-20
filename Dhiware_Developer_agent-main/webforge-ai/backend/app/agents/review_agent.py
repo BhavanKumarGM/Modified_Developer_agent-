@@ -1,8 +1,6 @@
 """Reviews every code modification for quality and correctness."""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
@@ -75,9 +73,3 @@ Identify any issues, then approve or reject. Output JSON only.
             )
         except Exception:
             return AgentResult(success=True, content="Review passed", data={"approved": True})
-
-    def _extract_json(self, text: str) -> dict:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("No JSON found")

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
@@ -73,10 +72,3 @@ Produce a JSON execution plan.
                     "requires_full_generation": True,
                 },
             )
-
-    def _extract_json(self, text: str) -> dict:
-        # Try to find JSON block in the response
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-        return json.loads(text)

@@ -1,9 +1,36 @@
+import { useEffect, useState } from 'react'
 import { Brain, Tag, Layers, Palette, Code2 } from 'lucide-react'
 import { useProjectStore } from '@/stores/projectStore'
+import { api } from '@/services/api'
+import type { ProjectMetadata } from '@/types'
 
 export function MemoryPanel() {
   const activeProject = useProjectStore((s) => s.activeProject)
-  const meta = activeProject?.metadata
+  const [memory, setMemory] = useState<ProjectMetadata | undefined>(activeProject?.metadata)
+
+  useEffect(() => {
+    if (!activeProject) {
+      setMemory(undefined)
+      return
+    }
+    // Seed from whatever the project list/detail call already gave us, then
+    // refresh from the dedicated memory endpoint so this panel reflects
+    // MemoryAgent's latest update even if the project object in the store
+    // is stale.
+    setMemory(activeProject.metadata)
+    let cancelled = false
+    api.projects
+      .memory(activeProject.id)
+      .then((res) => {
+        if (!cancelled) setMemory(res.memory as ProjectMetadata)
+      })
+      .catch(() => {
+        // Keep the seeded value; the panel just won't refresh this turn.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeProject?.id, activeProject?.metadata])
 
   if (!activeProject) {
     return <p className="text-xs text-text-muted text-center py-8 px-4">Select a project to view memory.</p>
@@ -11,10 +38,10 @@ export function MemoryPanel() {
 
   const entries = [
     { icon: Layers, label: 'Framework', value: activeProject.framework },
-    { icon: Palette, label: 'Styling', value: meta?.styling?.join(', ') },
-    { icon: Tag, label: 'Architecture', value: meta?.architecture },
-    { icon: Code2, label: 'Naming', value: meta?.namingConvention },
-    { icon: Brain, label: 'Libraries', value: meta?.preferredLibraries?.join(', ') },
+    { icon: Palette, label: 'Styling', value: memory?.styling?.join(', ') },
+    { icon: Tag, label: 'Architecture', value: memory?.architecture },
+    { icon: Code2, label: 'Naming', value: memory?.naming_convention },
+    { icon: Brain, label: 'Libraries', value: memory?.preferred_libraries?.join(', ') },
   ].filter((e) => e.value)
 
   if (entries.length === 0) {

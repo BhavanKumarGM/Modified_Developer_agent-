@@ -39,3 +39,11 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
     if not ok:
         raise HTTPException(status_code=404, detail="Project not found")
     return {"ok": True}
+
+
+@router.get("/{project_id}/memory")
+async def get_project_memory(project_id: str, db: AsyncSession = Depends(get_db)):
+    project = await project_service.get_project(db, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"memory": project.get("metadata") or {}}

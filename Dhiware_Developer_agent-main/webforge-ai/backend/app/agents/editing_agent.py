@@ -1,8 +1,6 @@
 """Modifies existing code with minimal, targeted patches."""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
@@ -15,23 +13,36 @@ You modify existing source files to fulfil the user's request.
 
 Output ONLY valid JSON (no markdown, no explanation outside the JSON):
 {
+  "edits": [
+    {
+      "path": "src/App.tsx",
+      "search": "the exact existing code to find — copy it verbatim from the file shown below, including whitespace",
+      "replacement": "the replacement code for that exact span"
+    }
+  ],
   "files": [
     {
       "path": "src/App.tsx",
       "content": "COMPLETE updated file — every single line, nothing omitted or truncated"
     }
   ],
-  "new_files": [],
+  "new_files": [
+    { "path": "src/components/NewThing.tsx", "content": "..." }
+  ],
+  "deletions": ["src/components/Obsolete.tsx"],
   "description": "what was changed"
 }
 
 STRICT RULES:
-1. You may ONLY edit files that appear in the "Existing files" section below.
-2. Never invent or create a file whose path was not shown to you.
-3. Put the FULL updated content in "content" — never use "..." or truncate.
-4. Escape all special characters properly for JSON: newlines as \\n, quotes as \\".
-5. Only include files that actually change. Leave unchanged files out.
-6. Output ONLY the JSON object. Start your response with { and end with }.
+1. You may ONLY edit files that appear in the "Existing files" section below. New files go in "new_files".
+2. PREFER "edits" (search/replace) for small, localized changes — a single function, a JSX block, a style tweak, a copy change. This is the primary format: it leaves the rest of the file untouched.
+3. Only use "files" (a full-file rewrite) when the change is substantial enough that most of the file's lines actually change — e.g. restructuring a component.
+4. "search" must be an exact, minimal, uniquely-matching substring of the current file content — copy it verbatim, do not paraphrase, reformat, or re-indent it.
+5. If you do use "files", put the FULL updated content in "content" — never use "..." or truncate.
+6. If the user asks to remove/delete a component or file entirely, put its path in "deletions" — do not just empty out its content.
+7. If you add an import of a sibling component/module that doesn't already exist in "Existing files", you MUST also generate it in "new_files" — never import something you didn't create.
+8. Escape all special characters properly for JSON: newlines as \\n, quotes as \\".
+9. Output ONLY the JSON object. Start your response with { and end with }.
 """
 
 
@@ -48,15 +59,17 @@ class EditingAgent(BaseAgent):
             for path, content in file_contents.items()
         )
 
+        memory_section = self._format_memory(context.metadata)
+
         prompt = f"""Task: {task}
 
 Project: {context.project_name} ({context.framework})
-
-Current file contents (read carefully before rewriting):
+{memory_section}
+Current file contents (read carefully before editing):
 {files_context}
 
-Return the full updated content of every file you change in the "files" array.
-Output JSON only."""
+Prefer "edits" (search/replace) for localized changes; only use "files" for
+substantial rewrites. Output JSON only."""
         request = self._build_request(
             system=SYSTEM_PROMPT,
             user=prompt,
@@ -66,54 +79,11 @@ Output JSON only."""
 
         try:
             data = self._extract_json(response.content)
-            paths = [e["path"] for e in data.get("edits", [])] + [f["path"] for f in data.get("new_files", [])]
+            paths = (
+                [e["path"] for e in data.get("edits", [])]
+                + [f["path"] for f in data.get("files", [])]
+                + [f["path"] for f in data.get("new_files", [])]
+            )
             return AgentResult(success=True, content=data.get("description", ""), data=data, files_modified=paths)
         except Exception as e:
             return AgentResult(success=False, error=str(e), content=response.content)
-
-    def _extract_json(self, text: str) -> dict:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if not match:
-            raise ValueError("No JSON found")
-        raw = match.group()
-        # Try strict parse first
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-        # Repair: the LLM often puts literal newlines inside JSON string values.
-        # Replace unescaped newlines/tabs inside string literals only.
-        repaired = self._repair_json_strings(raw)
-        return json.loads(repaired)
-
-    @staticmethod
-    def _repair_json_strings(text: str) -> str:
-        """Replace literal newlines/tabs inside JSON string values with escape sequences."""
-        result = []
-        in_string = False
-        escape_next = False
-        for ch in text:
-            if escape_next:
-                result.append(ch)
-                escape_next = False
-                continue
-            if ch == '\\' and in_string:
-                result.append(ch)
-                escape_next = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                result.append(ch)
-                continue
-            if in_string:
-                if ch == '\n':
-                    result.append('\\n')
-                elif ch == '\r':
-                    result.append('\\r')
-                elif ch == '\t':
-                    result.append('\\t')
-                else:
-                    result.append(ch)
-            else:
-                result.append(ch)
-        return ''.join(result)

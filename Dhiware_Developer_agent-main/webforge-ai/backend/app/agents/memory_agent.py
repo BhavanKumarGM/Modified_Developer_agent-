@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
@@ -72,9 +71,3 @@ What memory should be updated? Output JSON only.
             return AgentResult(success=True, content="Memory updated", data=merged)
         except Exception:
             return AgentResult(success=True, content="No memory updates", data=context.metadata)
-
-    def _extract_json(self, text: str) -> dict:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("No JSON found")

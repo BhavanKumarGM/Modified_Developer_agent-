@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.database import get_db
 from app.services import project_service
-from app.services.file_service import build_file_tree, read_file, write_file
+from app.services.file_service import build_file_tree, delete_file, read_file, write_file
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -23,6 +23,11 @@ class WriteFileRequest(BaseModel):
     projectId: str
     path: str
     content: str
+
+
+class DeleteFileRequest(BaseModel):
+    projectId: str
+    path: str
 
 
 @router.get("/tree/{project_id}")
@@ -49,6 +54,8 @@ async def read_file_content(req: ReadFileRequest, db: AsyncSession = Depends(get
     try:
         content, language = read_file(root, req.path)
         return {"content": content, "language": language}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -94,5 +101,23 @@ async def write_file_content(req: WriteFileRequest, db: AsyncSession = Depends(g
     try:
         write_file(root, req.path, req.content)
         return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/delete")
+async def delete_file_content(req: DeleteFileRequest, db: AsyncSession = Depends(get_db)):
+    project = await project_service.get_project(db, req.projectId)
+    if not project or not project.get("rootPath"):
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    root = Path(project["rootPath"])
+    try:
+        delete_file(root, req.path)
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")

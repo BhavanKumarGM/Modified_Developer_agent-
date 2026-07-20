@@ -1,8 +1,6 @@
 """Reads errors, stack traces, and console logs to diagnose and fix issues."""
 from __future__ import annotations
 
-import json
-import re
 from typing import Any
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
@@ -16,7 +14,7 @@ Output ONLY valid JSON:
 {
   "root_cause": "Description of the root cause",
   "affected_files": ["src/App.tsx"],
-  "fixes": [
+  "edits": [
     {
       "path": "src/App.tsx",
       "search": "exact problematic code",
@@ -74,9 +72,3 @@ Diagnose the root cause and provide specific fixes. Output JSON only.
             )
         except Exception as e:
             return AgentResult(success=False, error=str(e), content=response.content)
-
-    def _extract_json(self, text: str) -> dict:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("No JSON found")

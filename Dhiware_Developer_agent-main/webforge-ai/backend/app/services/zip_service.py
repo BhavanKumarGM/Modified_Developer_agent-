@@ -1,9 +1,14 @@
 """ZIP extraction and project analysis service."""
 from __future__ import annotations
 
+import logging
 import shutil
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from app.core.safe_path import resolve_safe
+
+logger = logging.getLogger("webforge.zip_service")
 
 IGNORE_DIRS = {"node_modules", "dist", "build", ".cache", ".git", "__pycache__", ".next"}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
@@ -40,7 +45,13 @@ def extract_zip(zip_path: Path, target_dir: Path) -> Path:
             if not rel_parts:
                 continue
 
-            target_path = target_dir.joinpath(*rel_parts)
+            rel_path = str(PurePosixPath(*rel_parts))
+            try:
+                target_path = resolve_safe(target_dir, rel_path)
+            except ValueError:
+                logger.warning("Skipping ZIP member outside target dir: %r", member.filename)
+                continue
+
             target_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:

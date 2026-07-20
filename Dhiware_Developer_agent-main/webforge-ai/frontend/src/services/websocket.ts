@@ -60,6 +60,12 @@ class WebForgeSocket {
     }
   }
 
+  /** Ask the backend to cancel the in-flight generation/edit for this
+   * project (see app/main.py's websocket_endpoint "stop" handling). */
+  stopGeneration() {
+    this.send({ type: 'stop' })
+  }
+
   on<T>(event: string, handler: Handler<T>) {
     const arr = this.handlers.get(event) ?? []
     arr.push(handler as Handler)

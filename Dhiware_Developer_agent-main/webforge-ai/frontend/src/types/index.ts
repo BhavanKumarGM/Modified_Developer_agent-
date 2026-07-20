@@ -16,16 +16,20 @@ export interface Project {
 export type Framework = 'react' | 'nextjs' | 'vue' | 'angular' | 'static' | 'unknown'
 export type ProjectStatus = 'idle' | 'generating' | 'running' | 'error' | 'ready'
 
+// Field names match the raw JSON produced by MemoryAgent / RepositoryAgent
+// on the backend (backend/app/agents/memory_agent.py,
+// backend/app/agents/repository_agent.py) — snake_case, unconverted.
 export interface ProjectMetadata {
   theme?: string
-  primaryColor?: string
+  primary_color?: string
   styling?: string[]
   architecture?: string
-  namingConvention?: string
-  folderStructure?: string
-  preferredLibraries?: string[]
-  hasTypeScript?: boolean
-  hasTests?: boolean
+  naming_convention?: string
+  folder_structure?: string
+  preferred_libraries?: string[]
+  component_style?: string
+  has_typescript?: boolean
+  has_tests?: boolean
 }
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
@@ -141,6 +145,7 @@ export interface PreviewState {
 export type WSEventType =
   | 'stream_token'
   | 'stream_done'
+  | 'stream_cancelled'
   | 'agent_status'
   | 'file_created'
   | 'file_modified'

@@ -25,6 +25,7 @@ export const api = {
     create: (data: { name: string; description?: string }) =>
       request<import('@/types').Project>('/projects', { method: 'POST', body: JSON.stringify(data) }),
     delete: (id: string) => request<void>(`/projects/${id}`, { method: 'DELETE' }),
+    memory: (id: string) => request<{ memory: Record<string, unknown> }>(`/projects/${id}/memory`),
   },
 
   chat: {
@@ -49,6 +50,11 @@ export const api = {
       request<void>('/files/write', {
         method: 'POST',
         body: JSON.stringify({ projectId, path, content }),
+      }),
+    delete: (projectId: string, path: string) =>
+      request<void>('/files/delete', {
+        method: 'POST',
+        body: JSON.stringify({ projectId, path }),
       }),
   },
 

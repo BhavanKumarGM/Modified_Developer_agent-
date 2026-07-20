@@ -1,6 +1,7 @@
 """Base class for all WebForge agents."""
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -64,3 +65,125 @@ class BaseAgent(ABC):
 
     def _log_task(self, task: str) -> None:
         self.logger.info(f"[{self.name}] Task: {task[:100]}")
+
+    _MEMORY_FIELDS = {
+        "theme", "primary_color", "architecture", "styling",
+        "naming_convention", "folder_structure", "preferred_libraries",
+        "component_style",
+    }
+
+    def _format_memory(self, metadata: dict) -> str:
+        """Render project memory (theme, naming convention, preferred libs,
+        ...) as a prompt section, so generation/editing stays stylistically
+        consistent with what MemoryAgent established on earlier turns. Empty
+        when there is no memory yet (e.g. the project's first turn)."""
+        if not metadata:
+            return ""
+        relevant = {k: v for k, v in metadata.items() if k in self._MEMORY_FIELDS and v}
+        if not relevant:
+            return ""
+        return (
+            "\nProject conventions established so far (stay consistent with these):\n"
+            f"{json.dumps(relevant, indent=2)}\n"
+        )
+
+    # ── JSON extraction ──────────────────────────────────────────────────
+    # The single implementation every agent uses to pull a JSON object out
+    # of raw LLM output. Do not add another copy of this in an agent — route
+    # through here so every agent gets the same (tested) parsing behavior.
+
+    def _extract_json(self, text: str) -> dict:
+        """Extract the first top-level JSON object from LLM output.
+
+        Scans for each '{' and attempts `json.JSONDecoder.raw_decode` from
+        that position — unlike a greedy regex, `raw_decode` stops exactly at
+        the matching close brace, so it doesn't over-match on stray braces
+        appearing in surrounding prose. If every attempt fails (typically
+        because the LLM left literal newlines/tabs inside a JSON string
+        value, which is invalid JSON), falls back to manually locating the
+        balanced-brace span and repairing those characters before retrying.
+        """
+        text = text.strip()
+        decoder = json.JSONDecoder()
+
+        for idx, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                obj, _ = decoder.raw_decode(text, idx)
+                return obj
+            except json.JSONDecodeError:
+                continue
+
+        span = self._find_balanced_brace_span(text)
+        if span is None:
+            raise ValueError("No JSON object found in response")
+        start, end = span
+        repaired = self._repair_json_strings(text[start:end])
+        return json.loads(repaired)
+
+    @staticmethod
+    def _find_balanced_brace_span(text: str) -> Optional[tuple[int, int]]:
+        """Return (start, end) of the first balanced {...} span, respecting
+        string boundaries so braces inside string values don't miscount."""
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, i + 1
+        return None
+
+    @staticmethod
+    def _repair_json_strings(text: str) -> str:
+        """Replace literal newlines/tabs inside JSON string values with
+        proper escape sequences (LLMs frequently emit these, producing
+        invalid-but-fixable JSON)."""
+        result = []
+        in_string = False
+        escape_next = False
+        for ch in text:
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                result.append(ch)
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                result.append(ch)
+                continue
+            if in_string:
+                if ch == "\n":
+                    result.append("\\n")
+                elif ch == "\r":
+                    result.append("\\r")
+                elif ch == "\t":
+                    result.append("\\t")
+                else:
+                    result.append(ch)
+            else:
+                result.append(ch)
+        return "".join(result)

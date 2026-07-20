@@ -97,6 +97,21 @@ export function useWebSocket(projectId: string | null) {
         }
       }),
 
+      socket.on<FileEvent>('file_deleted', ({ path }) => {
+        if (activeProject?.id !== projectId) return
+        api.files.tree(projectId)
+          .then((r) => setFileTree(r.tree))
+          .catch(() => {})
+        if (path) useProjectStore.getState().closeFile(path)
+      }),
+
+      socket.on<{ messageId: string }>('stream_cancelled', ({ messageId }) => {
+        // Cancellation still ends the stream from the UI's point of view —
+        // reuse the same "stop showing a live cursor" transition as a
+        // normal completion so the message doesn't look stuck forever.
+        finalizeStream(messageId)
+      }),
+
       socket.on<PreviewReadyEvent>('preview_ready', () => {}),
     ]
 

@@ -1,8 +1,6 @@
 """Analyzes uploaded repositories to understand their structure and architecture."""
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -74,9 +72,3 @@ Determine the framework, architecture, and conventions. Output JSON only.
             return AgentResult(success=True, content=data.get("summary", ""), data=data)
         except Exception as e:
             return AgentResult(success=False, error=str(e), content=response.content)
-
-    def _extract_json(self, text: str) -> dict:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("No JSON found")

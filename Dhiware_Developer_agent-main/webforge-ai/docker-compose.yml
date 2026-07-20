@@ -1,0 +1,40 @@
+# Brings up backend + frontend in containers. Ollama stays external/host-run
+# (bundling model weights in a container is out of scope) — install it on
+# the host and run `ollama serve` before `docker-compose up`.
+#
+# Ports are published to 127.0.0.1 only, matching this app's no-auth
+# security posture (see README > Security posture): nothing here is
+# reachable from the network unless you deliberately change that.
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      HOST: "0.0.0.0" # safe inside the container network; see Dockerfile comment
+      PORT: "8000"
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      DB_URL: "sqlite+aiosqlite:////data/webforge.db"
+      PROJECTS_DIR: "/projects"
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux too (Docker Desktop on
+      # Mac/Windows already provides it).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - webforge_projects:/projects
+      - webforge_db:/data
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      VITE_API_PROXY_TARGET: "http://backend:8000"
+    depends_on:
+      - backend
+
+volumes:
+  webforge_projects:
+  webforge_db:

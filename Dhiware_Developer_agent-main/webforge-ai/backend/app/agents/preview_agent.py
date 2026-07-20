@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,17 @@ from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
 from app.core.config import settings
 
 IS_WINDOWS = platform.system() == "Windows"
+
+
+def _require_executable(name: str) -> str:
+    """Resolve an executable via PATH, never via a shell. Raises with a
+    clear message if it isn't installed rather than silently falling back
+    to the shell (which is how this used to "just work" on Windows for
+    npm.cmd/npx.cmd)."""
+    path = shutil.which(name)
+    if not path:
+        raise FileNotFoundError(f"'{name}' was not found on PATH. Is Node.js installed?")
+    return path
 
 # ── Dependency auto-detection ────────────────────────────────────────────────
 # The code generation LLM is allowed to import npm packages beyond react/react-dom
@@ -301,13 +313,14 @@ class PreviewAgent(BaseAgent):
         # Start Vite dev server
         env = {**os.environ, "BROWSER": "none", "NO_COLOR": "1"}
         try:
+            npm = _require_executable("npm")
             process = subprocess.Popen(
-                f"npm run dev -- --port {port} --host",
+                [npm, "run", "dev", "--", "--port", str(port), "--host"],
                 cwd=str(root),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                shell=True,
+                shell=False,
                 text=True,
                 bufsize=1,
             )
@@ -344,6 +357,13 @@ class PreviewAgent(BaseAgent):
             except Exception:
                 pass
         return AgentResult(success=True, content="Preview stopped")
+
+    async def stop_all(self) -> None:
+        """Terminate every still-running dev server. Called on backend
+        shutdown so a restart doesn't leave orphaned `npm run dev`
+        processes holding preview ports open."""
+        for project_id in list(self._processes.keys()):
+            await self._stop(project_id)
 
     # ── Source migration ───────────────────────────────────────────────────────
 
@@ -514,10 +534,11 @@ class PreviewAgent(BaseAgent):
         return False
 
     def _run_npm_install(self, root: Path) -> tuple[int, str]:
+        npm = _require_executable("npm")
         result = subprocess.run(
-            "npm install --prefer-offline",
+            [npm, "install", "--prefer-offline"],
             cwd=str(root),
-            shell=True,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=240,
@@ -525,10 +546,11 @@ class PreviewAgent(BaseAgent):
         return result.returncode, (result.stdout or "") + (result.stderr or "")
 
     def _run_typecheck(self, root: Path) -> tuple[bool, str]:
+        npx = _require_executable("npx")
         result = subprocess.run(
-            "npx tsc --noEmit",
+            [npx, "tsc", "--noEmit"],
             cwd=str(root),
-            shell=True,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=60,
