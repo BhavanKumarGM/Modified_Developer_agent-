@@ -99,6 +99,12 @@ export const api = {
   },
 
   ollama: {
-    status: () => request<{ connected: boolean; models: string[] }>('/ollama/status'),
+    status: () =>
+      request<{
+        connected: boolean
+        models: string[]
+        default_model_available: boolean
+        embedding_model_available: boolean
+      }>('/ollama/status'),
   },
 }
