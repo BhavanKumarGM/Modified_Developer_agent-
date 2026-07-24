@@ -33,6 +33,8 @@ something silently half-implemented behind this README.
 
 - **Prompt → Website** — describe your app in plain English, get a full React/Vite/TS project
 - **ZIP Upload** — upload existing code, AI analyses the structure, continue developing
+- **GitHub Import** — paste a public repo URL and it's cloned in (with full commit
+  history) instead of uploading a zip
 - **Live Preview** — embedded Vite dev server with real-time iframe preview
 - **AI Code Editor** — Monaco editor (VS Code engine) with file explorer
 - **Iterative Editing** — ask the AI to modify any part of your code
@@ -181,10 +183,11 @@ Ollama (local AI — port 11434)
 `GitAgent`, `MemoryAgent`. Every one of them is wired into a real code path —
 none are dead weight.
 
-**3 Workflows**:
+**4 Workflows**:
 1. **Prompt → Website** — AI generates full React project from description
 2. **ZIP Upload** — Upload existing code, AI analyses it, you continue
-3. **Continue Development** — Ask AI to modify any generated project
+3. **GitHub Import** — Paste a public repo URL, it's cloned in (full history kept), AI analyses it, you continue
+4. **Continue Development** — Ask AI to modify any generated project
 
 ---
 
@@ -266,6 +269,10 @@ local dev server, not a multi-tenant service:
   paths, and symlink escapes.
 - **No shell interpolation**: all `npm`/`npx` subprocess calls in
   `PreviewAgent` use `shell=False` with an argument list, not a shell string.
+- **GitHub import is URL-restricted**: `/api/upload/github` only accepts
+  `https://github.com/<owner>/<repo>` — no `git://`, `ssh://`, `file://`, or
+  other hosts — so it can't be used to make the backend fetch from an
+  internal network address or the local filesystem (`app/services/github_service.py`).
 - Run `pytest tests/security/` in `backend/` to exercise these guarantees.
 
 ---

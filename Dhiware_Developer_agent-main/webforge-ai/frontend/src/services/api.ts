@@ -79,6 +79,14 @@ export const api = {
         xhr.send(form)
       })
     },
+    github: (url: string) =>
+      // Real `git clone` can take a while — matches the backend's own
+      // GITHUB_CLONE_TIMEOUT_SECONDS so the request isn't aborted first.
+      request<import('@/types').Project>('/upload/github', {
+        method: 'POST',
+        body: JSON.stringify({ url }),
+        timeout: 300000,
+      }),
   },
 
   preview: {
