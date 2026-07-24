@@ -55,6 +55,7 @@ KNOWN_PACKAGE_VERSIONS: dict[str, str] = {
     "recharts": "^2.12.2",
     "chart.js": "^4.4.2",
     "react-chartjs-2": "^5.2.0",
+    "@chakra-ui/react": "^2.8.2",
     "axios": "^1.6.8",
     "uuid": "^9.0.1",
     "classnames": "^2.5.1",
@@ -493,7 +494,20 @@ class PreviewAgent(BaseAgent):
             if name not in known
         )
         for name in missing:
-            pkg["dependencies"][name] = KNOWN_PACKAGE_VERSIONS.get(name, "latest")
+            pinned = KNOWN_PACKAGE_VERSIONS.get(name)
+            if pinned is None:
+                # Not in our allowlist — "latest" can silently pull a
+                # breaking major version on the next npm install (this is
+                # exactly how @chakra-ui/react "latest" resolved to v3 and
+                # broke a generated component's Table API with no clear
+                # error pointing back at the real cause). Loud on purpose.
+                self.logger.warning(
+                    f"'{name}' is not in KNOWN_PACKAGE_VERSIONS — pinning to \"latest\", "
+                    f"which is not reproducible and may pull a breaking major version. "
+                    f"Consider adding a known-good version to KNOWN_PACKAGE_VERSIONS."
+                )
+                pinned = "latest"
+            pkg["dependencies"][name] = pinned
         if missing:
             self.logger.info(f"Auto-added missing dependencies: {', '.join(missing)}")
 
