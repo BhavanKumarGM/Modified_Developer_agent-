@@ -119,7 +119,6 @@ def normalize_generated_path(rel_path: str) -> str:
     return rel
 
 
-
 # Matches content that is ENTIRELY one markdown code fence, e.g.
 # ```tsx\nimport React ...\n``` — with nothing but the fence markers
 # themselves before/after the code. Deliberately does not touch a fence
