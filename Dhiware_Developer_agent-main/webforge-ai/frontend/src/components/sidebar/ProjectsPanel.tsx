@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Plus, FolderOpen, Trash2, Upload, Loader2 } from 'lucide-react'
+import { Plus, FolderOpen, Trash2, Upload, Github, Loader2 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useProjectStore } from '@/stores/projectStore'
 import { useChatStore } from '@/stores/chatStore'
@@ -76,12 +76,63 @@ function NewProjectDialog({ onClose, onCreate }: NewProjectDialogProps) {
   )
 }
 
+interface GithubImportDialogProps {
+  onClose: () => void
+  onImport: (url: string) => Promise<void>
+}
+
+function GithubImportDialog({ onClose, onImport }: GithubImportDialogProps) {
+  const [url, setUrl] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    if (!url.trim()) return
+    setLoading(true)
+    setError(null)
+    try {
+      await onImport(url.trim())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to import repository')
+      setLoading(false)
+    }
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -8 }}
+      className="mx-3 mb-2 rounded-xl border border-border-default bg-surface-3 p-3 space-y-2"
+    >
+      <input
+        autoFocus
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="https://github.com/owner/repo"
+        className="w-full rounded-lg bg-surface-4 border border-border-subtle px-3 py-1.5 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
+        onKeyDown={(e) => e.key === 'Enter' && submit()}
+        disabled={loading}
+      />
+      {error && <p className="text-[11px] text-red-400">{error}</p>}
+      <p className="text-[10px] text-text-muted">Public repositories only.</p>
+      <div className="flex gap-2">
+        <Button variant="primary" size="sm" className="flex-1" loading={loading} onClick={submit}>
+          Import
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onClose} disabled={loading}>Cancel</Button>
+      </div>
+    </motion.div>
+  )
+}
+
 export function ProjectsPanel() {
   const { projects, activeProject, setProjects, addProject, setActiveProject, removeProject, setFileTree, openFile } =
     useProjectStore()
   const clearMessages = useChatStore((s) => s.clearMessages)
   const { setSidebarPanel, isSidebarCollapsed, toggleSidebar } = useUIStore()
   const [showNew, setShowNew] = useState(false)
+  const [showGithubImport, setShowGithubImport] = useState(false)
   const [loading, setLoading] = useState(true)
   const [uploadRef, setUploadRef] = useState<HTMLInputElement | null>(null)
 
@@ -135,6 +186,15 @@ export function ProjectsPanel() {
     removeProject(id)
   }
 
+  const handleGithubImport = async (url: string) => {
+    const project = await api.upload.github(url)
+    addProject(project)
+    setActiveProject(project)
+    clearMessages()
+    setShowGithubImport(false)
+    await loadProjectFiles(project)
+  }
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-1 px-3 py-2">
@@ -148,6 +208,14 @@ export function ProjectsPanel() {
           title="Upload ZIP"
         >
           <Upload className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowGithubImport(true)}
+          title="Import from GitHub"
+        >
+          <Github className="h-3.5 w-3.5" />
         </Button>
         <input
           ref={setUploadRef}
@@ -174,6 +242,9 @@ export function ProjectsPanel() {
         {showNew && (
           <NewProjectDialog onClose={() => setShowNew(false)} onCreate={handleCreate} />
         )}
+        {showGithubImport && (
+          <GithubImportDialog onClose={() => setShowGithubImport(false)} onImport={handleGithubImport} />
+        )}
       </AnimatePresence>
 
       {loading ? (
@@ -182,7 +253,7 @@ export function ProjectsPanel() {
         </div>
       ) : projects.length === 0 ? (
         <p className="text-xs text-text-muted text-center py-8 px-4">
-          No projects yet. Create one or upload a ZIP.
+          No projects yet. Create one, upload a ZIP, or import from GitHub.
         </p>
       ) : (
         <div className="space-y-0.5 px-2">
