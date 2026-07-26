@@ -178,3 +178,64 @@ def test_does_not_flag_local_package_directory(tmp_path: Path):
     packages = _find_imported_pip_packages(tmp_path)
     assert "backend" not in packages
     assert "numpy" in packages
+
+
+# ── _looks_like_static_site ─────────────────────────────────────────────────
+# Regression coverage for a real live bug: an uploaded plain HTML/CSS/JS
+# project was silently force-migrated into the canonical React/Vite shell,
+# which overwrote its real index.html and rendered a blank page (main.tsx's
+# `import App from './App'` resolved case-insensitively to the project's own
+# non-component app.js, so React tried to render `<undefined />`).
+
+def test_static_site_true_for_plain_html_js_project(agent, tmp_path: Path):
+    (tmp_path / "index.html").write_text(
+        "<html><body><script src='app.js'></script></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "app.js").write_text("document.addEventListener('DOMContentLoaded', () => {})", encoding="utf-8")
+    assert agent._looks_like_static_site(tmp_path) is True
+
+
+def test_static_site_false_when_no_index_html(agent, tmp_path: Path):
+    (tmp_path / "app.js").write_text("console.log('hi')", encoding="utf-8")
+    assert agent._looks_like_static_site(tmp_path) is False
+
+
+def test_static_site_false_for_already_canonicalized_react_shell(agent, tmp_path: Path):
+    (tmp_path / "index.html").write_text(
+        '<html><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>',
+        encoding="utf-8",
+    )
+    assert agent._looks_like_static_site(tmp_path) is False
+
+
+def test_static_site_false_when_tsx_files_present(agent, tmp_path: Path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "App.tsx").write_text("export default function App() { return null }", encoding="utf-8")
+    assert agent._looks_like_static_site(tmp_path) is False
+
+
+def test_static_site_false_when_package_json_declares_react(agent, tmp_path: Path):
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"dependencies": {"react": "^18.0.0"}}', encoding="utf-8")
+    assert agent._looks_like_static_site(tmp_path) is False
+
+
+@pytest.mark.asyncio
+async def test_start_serves_static_site_instead_of_vite(agent, tmp_path: Path):
+    (tmp_path / "index.html").write_text(
+        "<html><body><script src='app.js'></script></body></html>", encoding="utf-8"
+    )
+    (tmp_path / "app.js").write_text("console.log('hi')", encoding="utf-8")
+
+    static_result = AgentResult(success=True, content="ok", data={"port": 4000, "url": "http://127.0.0.1:4000"})
+    with patch.object(agent, "_stop", new=AsyncMock(return_value=AgentResult(success=True))), \
+         patch.object(agent, "_start_static", new=AsyncMock(return_value=static_result)) as start_static, \
+         patch.object(agent, "_start_frontend", new=AsyncMock()) as start_frontend:
+        result = await agent._start(_context(tmp_path))
+
+    assert result.success is True
+    assert result.data["port"] == 4000
+    start_static.assert_awaited_once()
+    start_frontend.assert_not_awaited()

@@ -350,6 +350,32 @@ class PreviewAgent(BaseAgent):
             if python_only:
                 return backend_result
 
+        # An uploaded/imported project might be a plain static site (no
+        # React at all) rather than something Vite should ever touch —
+        # force-migrating its files into src/ and overwriting its real
+        # index.html with the canonical React shell silently breaks it
+        # (import ./App resolves to a non-component file, renders nothing).
+        # Serve it as-is instead of running it through _start_frontend.
+        if self._looks_like_static_site(root):
+            static_result = await self._start_static(project_id, root)
+            if not static_result.success:
+                if backend_info:
+                    await self._stop_backend(project_id)
+                return static_result
+            if backend_result:
+                merged = {
+                    **static_result.data,
+                    "backendPort": backend_result.data["port"],
+                    "backendUrl": backend_result.data["url"],
+                    "backendFramework": backend_info.framework,
+                }
+                return AgentResult(
+                    success=True,
+                    content=f"{static_result.content} | Backend ({backend_info.framework}) running at {backend_result.data['url']}",
+                    data=merged,
+                )
+            return static_result
+
         frontend_result = await self._start_frontend(context, root)
         if not frontend_result.success:
             if backend_info:
@@ -385,6 +411,77 @@ class PreviewAgent(BaseAgent):
                 if next(src.rglob(ext), None) is not None:
                     return False
         return True
+
+    def _looks_like_static_site(self, root: Path) -> bool:
+        """True for a plain HTML/CSS/JS project with no React signal
+        anywhere — an uploaded/imported static site that must be served
+        as-is rather than force-migrated into the canonical Vite/React
+        shell. A project we already canonicalized (index.html loading
+        /src/main.tsx) is never mistaken for one of these."""
+        index_html = root / "index.html"
+        if not index_html.exists():
+            return False
+        try:
+            html = index_html.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        if "/src/main.tsx" in html or "/src/main.jsx" in html:
+            return False
+
+        for ext in ("*.tsx", "*.jsx"):
+            if next(root.rglob(ext), None) is not None:
+                return False
+
+        pkg_path = root / "package.json"
+        if pkg_path.exists():
+            try:
+                pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                if "react" in deps:
+                    return False
+            except Exception:
+                pass
+
+        return True
+
+    async def _start_static(self, project_id: str, root: Path) -> AgentResult:
+        """Serve a plain static HTML/CSS/JS project directly, bypassing
+        the Vite/React pipeline entirely — no config rewriting, no
+        index.html overwrite, no npm install."""
+        port = await self._find_port()
+        if not port:
+            return AgentResult(success=False, error="No available ports in range")
+
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+                cwd=str(root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                text=True,
+                bufsize=1,
+            )
+            self._processes[project_id] = process
+            self._ports[project_id] = port
+
+            ready = await self._wait_for_port(port, timeout=15, process=process)
+            if not ready:
+                output = self._drain_output(process)
+                return AgentResult(
+                    success=False,
+                    error=f"Static file server did not open port {port} within 15 s.\n\n{output[-1200:]}",
+                )
+
+            url = f"http://127.0.0.1:{port}"
+            self.logger.info(f"Static preview ready → {url}")
+            return AgentResult(
+                success=True,
+                content=f"Static preview running at {url}",
+                data={"port": port, "url": url},
+            )
+        except Exception as e:
+            return AgentResult(success=False, error=str(e))
 
     async def _start_frontend(self, context: AgentContext, root: Path) -> AgentResult:
         project_id = context.project_id
