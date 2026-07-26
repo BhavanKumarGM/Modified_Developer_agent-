@@ -197,26 +197,30 @@ export function ProjectsPanel() {
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1 px-3 py-2">
-        <Button variant="primary" size="sm" className="flex-1 gap-1.5" onClick={() => setShowNew(true)}>
+      <div className="flex flex-col gap-1.5 px-3 py-2">
+        <Button variant="primary" size="sm" className="w-full gap-1.5" onClick={() => setShowNew(true)}>
           <Plus className="h-3.5 w-3.5" /> New Project
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => uploadRef?.click()}
-          title="Upload ZIP"
-        >
-          <Upload className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setShowGithubImport(true)}
-          title="Import from GitHub"
-        >
-          <Github className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1 gap-1.5"
+            onClick={() => uploadRef?.click()}
+            title="Upload ZIP"
+          >
+            <Upload className="h-3.5 w-3.5" /> Upload ZIP
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex-1 gap-1.5"
+            onClick={() => setShowGithubImport(true)}
+            title="Import from GitHub"
+          >
+            <Github className="h-3.5 w-3.5" /> GitHub
+          </Button>
+        </div>
         <input
           ref={setUploadRef}
           type="file"
