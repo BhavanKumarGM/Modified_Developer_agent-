@@ -47,6 +47,8 @@ something silently half-implemented behind this README.
 - **Prompt → Website** — describe your app in plain English, get a full React/Vite/TS project
 - **Prompt → Backend** — ask for an API/server and get a runnable Flask backend (routes, models, `requirements.txt`)
 - **ZIP Upload** — upload existing code, AI analyses the structure, continue developing
+- **GitHub Import** — paste a public repo URL and it's cloned in (with full commit
+  history) instead of uploading a zip
 - **Live Preview** — embedded Vite dev server with real-time iframe preview; Python backends run alongside it in an isolated per-project virtualenv
 - **AI Code Editor** — Monaco editor (VS Code engine) with file explorer
 - **Iterative Editing** — ask the AI to modify any part of your code
@@ -200,11 +202,12 @@ agent): `app/services/backend_detect.py` detects Flask/Django/FastAPI by
 static inspection, then `PreviewAgent` creates an isolated `.venv`, installs
 dependencies, and launches the right dev-server CLI for the framework.
 
-**4 Workflows**:
+**5 Workflows**:
 1. **Prompt → Website** — AI generates full React project from description
 2. **Prompt → Backend** — AI generates a runnable Flask backend
 3. **ZIP Upload** — Upload existing code, AI analyses it, you continue
-4. **Continue Development** — Ask AI to modify any generated project
+4. **GitHub Import** — Paste a public repo URL, it's cloned in (full history kept), AI analyses it, you continue
+5. **Continue Development** — Ask AI to modify any generated project
 
 ---
 
@@ -302,6 +305,10 @@ local dev server, not a multi-tenant service:
   paths, and symlink escapes.
 - **No shell interpolation**: all `npm`/`npx` subprocess calls in
   `PreviewAgent` use `shell=False` with an argument list, not a shell string.
+- **GitHub import is URL-restricted**: `/api/upload/github` only accepts
+  `https://github.com/<owner>/<repo>` — no `git://`, `ssh://`, `file://`, or
+  other hosts — so it can't be used to make the backend fetch from an
+  internal network address or the local filesystem (`app/services/github_service.py`).
 - Run `pytest tests/security/` in `backend/` to exercise these guarantees.
 
 ---
