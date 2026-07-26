@@ -80,6 +80,14 @@ class Orchestrator:
         # file. Not a distributed lock — this is a single-process tool.
         self._write_locks: dict[str, asyncio.Lock] = {}
 
+        # The most recently review-rejected proposal per project, so that
+        # a later "apply anyway" actually reapplies THAT specific proposal
+        # instead of re-running the pipeline on the content-free phrase
+        # "apply anyway" itself (which previously just produced "No changes
+        # were necessary" — see _apply_pending_proposal). Overwritten by
+        # each new rejection; cleared once applied.
+        self._pending_proposals: dict[str, dict] = {}
+
     def _get_write_lock(self, project_id: str) -> asyncio.Lock:
         lock = self._write_locks.get(project_id)
         if lock is None:
@@ -167,6 +175,19 @@ class Orchestrator:
         force_apply = any(p in user_message.lower() for p in FORCE_APPLY_PHRASES)
 
         logger.info(f"Turn start: project={project_id} message='{user_message[:80]}'")
+
+        # 0. "apply anyway"/"force apply"/etc. reapply a specific
+        # previously-rejected proposal if one is on file for this project —
+        # skip the planner/search/editing pipeline entirely rather than
+        # re-running it on the content-free phrase itself (which used to
+        # just produce "No changes were necessary").
+        if force_apply and project_id in self._pending_proposals:
+            async for token in self._apply_pending_proposal(context, message_id):
+                yield token
+            self._emit(project_id, "agent_status", {"agent": "conversation", "status": "idle"})
+            logger.info(f"Turn end: project={project_id}")
+            return
+
         self._emit(project_id, "agent_status", {"agent": "planner", "status": "thinking", "task": "Analyzing request"})
 
         # 1. Plan
@@ -317,6 +338,31 @@ class Orchestrator:
         lines.append('\nAsk me to fix the issues, or say "apply anyway" to force it through.')
         return False, "\n".join(lines)
 
+    async def _apply_pending_proposal(self, context: AgentContext, message_id: str) -> AsyncIterator[str]:
+        """Reapply the project's most recent review-rejected proposal,
+        bypassing the review gate — this is what "apply anyway" actually
+        triggers. Pops (consumes) the pending entry; a repeated "apply
+        anyway" with nothing pending is a no-op."""
+        pending = self._pending_proposals.pop(context.project_id, None)
+        if pending is None:
+            return
+
+        intro = "Applying the previously-rejected change anyway.\n\n"
+        self._emit(context.project_id, "stream_token", {"token": intro, "messageId": message_id})
+        yield intro
+
+        if pending["kind"] == "generation":
+            async for token in self._finalize_generation(
+                context, pending["task"], pending["files"], message_id, force_apply=True
+            ):
+                yield token
+        elif pending["kind"] == "editing":
+            content = await self._apply_edits(context, pending["data"], pending["task"], force_apply=True)
+            self._emit(context.project_id, "stream_token", {"token": content, "messageId": message_id})
+            yield content
+
+        self._emit(context.project_id, "stream_done", {"messageId": message_id})
+
     # ── Memory ───────────────────────────────────────────────────────────────
 
     async def _update_memory(self, context: AgentContext, task: str, files: list[dict]) -> None:
@@ -434,6 +480,69 @@ class Orchestrator:
             # — check those next round instead of re-scanning everything.
             remaining = written
 
+    # ── Patch-match repair ──────────────────────────────────────────────────
+
+    async def _repair_unresolved_patches(
+        self, context: AgentContext, task: str, root: Path, unresolved: list[dict]
+    ) -> tuple[list[str], list[str], list[str]]:
+        """One bounded retry for search/replace patches that didn't match
+        even after file_service.flexible_find's whitespace-normalized
+        fallback — the exact-match brittleness of search/replace patching
+        used to leave these as a dead-end "Could not apply patch" with no
+        recovery. Gives EditingAgent the file's real, current content (the
+        mismatch is usually because its `search` was based on stale or
+        misremembered content) and asks it to redo just those edits.
+        Returns (applied_messages, error_messages, written_paths) for the
+        caller to merge into its own results; empty on failure — this never
+        raises, so a repair that doesn't work just leaves the original
+        "could not apply" error standing.
+        """
+        fresh_contents: dict[str, str] = {}
+        descriptions: list[str] = []
+        for edit in unresolved:
+            rel = edit.get("path", "")
+            if not rel:
+                continue
+            if rel not in fresh_contents:
+                try:
+                    content, _ = file_service.read_file(root, rel)
+                    fresh_contents[rel] = content
+                except (FileNotFoundError, ValueError):
+                    continue
+            search = (edit.get("search") or "")[:300]
+            replacement = (edit.get("replacement") or "")[:300]
+            descriptions.append(f'- In {rel}: change roughly "{search}" to roughly "{replacement}"')
+
+        if not fresh_contents:
+            return [], [], []
+
+        logger.warning(f"Patch match failed for {sorted(fresh_contents)}, attempting repair")
+
+        repair_task = (
+            f'The following change(s) for "{task}" failed to apply because '
+            "the exact text to search for didn't match the file's real "
+            "content shown below. Re-propose the same intended change(s) "
+            'as "edits" (or a full "files" rewrite if that is cleaner), '
+            "using search text that actually matches what's shown:\n\n"
+            + "\n".join(descriptions)
+        )
+        try:
+            repair_result = await self.editing.run(repair_task, context, file_contents=fresh_contents)
+        except Exception as e:
+            logger.warning(f"Patch repair call failed: {e}")
+            return [], [], []
+
+        if not repair_result.success:
+            return [], [], []
+
+        async with self._get_write_lock(context.project_id):
+            applied, errors, written, _further_unresolved = self._write_edit_operations(
+                context, root, repair_result.data
+            )
+        # Bounded to one round — any edits still unresolved after this are
+        # left as a normal "could not apply" error, not retried again.
+        return [f"{a} (retried)" for a in applied], errors, written
+
     async def _handle_generation(
         self,
         context: AgentContext,
@@ -460,47 +569,64 @@ class Orchestrator:
         gen_result = await self.codegen.run(task, context, plan=plan)
 
         if gen_result.success and gen_result.data.get("files"):
-            files = gen_result.data["files"]
-
-            if not force_apply:
-                approved, review_msg = await self._review_files(context, task, files)
-                if not approved:
-                    self._emit(context.project_id, "stream_token", {"token": review_msg, "messageId": message_id})
-                    yield review_msg
-                    if emit_done:
-                        self._emit(context.project_id, "stream_done", {"messageId": message_id})
-                    return
-
-            async with self._get_write_lock(context.project_id):
-                written_paths = await self._write_files(context.root_path, files)
-
-            await self._repair_missing_local_imports(context, task, written_paths)
-
-            self._emit(context.project_id, "agent_status", {
-                "agent": "git", "status": "working", "task": "Creating snapshot"
-            })
-            await self.git.run("snapshot", context, action="snapshot", changes=[f["path"] for f in files])
-
-            self._emit(context.project_id, "agent_status", {
-                "agent": "codegen", "status": "done"
-            })
-
-            summary = f"\n\n✅ **Generated {len(files)} files** successfully.\n"
-            summary += "\n".join(f"- `{f['path']}`" for f in files[:10])
-            if len(files) > 10:
-                summary += f"\n- ...and {len(files) - 10} more files"
-
-            self._emit(context.project_id, "stream_token", {"token": summary, "messageId": message_id})
-            yield summary
-
-            # Update file events
-            for f in files:
-                self._emit(context.project_id, "file_created", {"path": f["path"]})
-
-            await self._update_memory(context, task, files)
+            async for token in self._finalize_generation(
+                context, task, gen_result.data["files"], message_id, force_apply
+            ):
+                yield token
 
         if emit_done:
             self._emit(context.project_id, "stream_done", {"messageId": message_id})
+
+    async def _finalize_generation(
+        self,
+        context: AgentContext,
+        task: str,
+        files: list[dict],
+        message_id: str,
+        force_apply: bool,
+    ) -> AsyncIterator[str]:
+        """Review-gate, write, snapshot, and summarize a generated file
+        set. Split out from _handle_generation so _apply_pending_proposal
+        can run the exact same finalize step for a previously-rejected
+        proposal without re-running codegen. Does not itself emit
+        stream_done — callers own that."""
+        if not force_apply:
+            approved, review_msg = await self._review_files(context, task, files)
+            if not approved:
+                self._pending_proposals[context.project_id] = {
+                    "kind": "generation", "task": task, "files": files,
+                }
+                self._emit(context.project_id, "stream_token", {"token": review_msg, "messageId": message_id})
+                yield review_msg
+                return
+
+        async with self._get_write_lock(context.project_id):
+            written_paths = await self._write_files(context.root_path, files)
+
+        await self._repair_missing_local_imports(context, task, written_paths)
+
+        self._emit(context.project_id, "agent_status", {
+            "agent": "git", "status": "working", "task": "Creating snapshot"
+        })
+        await self.git.run("snapshot", context, action="snapshot", changes=[f["path"] for f in files])
+
+        self._emit(context.project_id, "agent_status", {
+            "agent": "codegen", "status": "done"
+        })
+
+        summary = f"\n\n✅ **Generated {len(files)} files** successfully.\n"
+        summary += "\n".join(f"- `{f['path']}`" for f in files[:10])
+        if len(files) > 10:
+            summary += f"\n- ...and {len(files) - 10} more files"
+
+        self._emit(context.project_id, "stream_token", {"token": summary, "messageId": message_id})
+        yield summary
+
+        # Update file events
+        for f in files:
+            self._emit(context.project_id, "file_created", {"path": f["path"]})
+
+        await self._update_memory(context, task, files)
 
     async def _handle_editing(
         self,
@@ -613,13 +739,30 @@ class Orchestrator:
         if proposed_files and not force_apply:
             approved, review_msg = await self._review_files(context, task, proposed_files)
             if not approved:
+                self._pending_proposals[context.project_id] = {
+                    "kind": "editing", "task": task, "data": data,
+                }
                 return review_msg
 
         # Held for the whole write phase (not just one file at a time) so a
         # second concurrent edit to this project can't interleave its own
         # writes with these.
         async with self._get_write_lock(context.project_id):
-            applied, errors, written_paths = self._write_edit_operations(context, root, data)
+            applied, errors, written_paths, unresolved_edits = self._write_edit_operations(context, root, data)
+
+        if unresolved_edits:
+            repair_applied, repair_errors, repair_written = await self._repair_unresolved_patches(
+                context, task, root, unresolved_edits
+            )
+            if repair_written:
+                repaired = set(repair_written)
+                errors = [
+                    e for e in errors
+                    if not (e.startswith("Could not apply patch to `") and e[len("Could not apply patch to `"):-1] in repaired)
+                ]
+            applied += repair_applied
+            errors += repair_errors
+            written_paths += repair_written
 
         await self._repair_missing_local_imports(context, task, written_paths)
 
@@ -636,10 +779,13 @@ class Orchestrator:
 
     def _write_edit_operations(
         self, context: AgentContext, root: Path, data: dict
-    ) -> tuple[list[str], list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[str], list[dict]]:
         """Apply every write/edit/delete in an EditingAgent/DebugAgent
         result. Must be called with the project's write lock held. Returns
-        (applied_messages, error_messages, written_relative_paths)."""
+        (applied_messages, error_messages, written_relative_paths,
+        unresolved_edits) — unresolved_edits are search/replace patches
+        that didn't match even after flexible_find's whitespace-normalized
+        retry, for _apply_edits to attempt an LLM-assisted repair on."""
         applied: list[str] = []
         errors: list[str] = []
         written: list[str] = []
@@ -696,6 +842,7 @@ class Orchestrator:
         # Search/replace edits — the primary format for small, localized
         # changes (see EditingAgent's prompt). Kept alongside full-file
         # rewrites, which remain the fallback for substantial restructuring.
+        unresolved_edits: list[dict] = []
         for edit in data.get("edits", []):
             rel = edit.get("path", "")
             try:
@@ -709,13 +856,20 @@ class Orchestrator:
             try:
                 search = edit.get("search", "")
                 replacement = edit.get("replacement", "")
-                if search and search in content:
-                    file_service.write_file(root, rel, content.replace(search, replacement, 1))
+                # Try an exact match first; if the model's search text
+                # differs only by whitespace/indentation from the real
+                # file (the single most common cause of a failed patch),
+                # flexible_find resolves it to the real substring instead
+                # of giving up outright.
+                resolved_search = file_service.flexible_find(content, search)
+                if resolved_search is not None:
+                    file_service.write_file(root, rel, content.replace(resolved_search, replacement, 1))
                     applied.append(f"Patched `{rel}`")
                     written.append(rel)
                     self._emit(context.project_id, "file_modified", {"path": rel})
                 else:
                     errors.append(f"Could not apply patch to `{rel}`")
+                    unresolved_edits.append(edit)
             except Exception as e:
                 errors.append(f"Error editing {rel}: {e}")
 
@@ -735,7 +889,7 @@ class Orchestrator:
             except Exception as e:
                 errors.append(f"Error deleting {rel}: {e}")
 
-        return applied, errors, written
+        return applied, errors, written, unresolved_edits
 
     async def analyze_repository(self, project_id: str, root_path: str, project_name: str) -> dict:
         """Analyze an uploaded repository and extract metadata."""

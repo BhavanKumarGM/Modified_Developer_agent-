@@ -208,11 +208,20 @@ none are dead weight.
    imports the target symbol (including via an aliased import), not just
    keyword matches. `EditingAgent`/`DebugAgent` then proposes changes,
    preferring small `search`/`replace` patches over full-file rewrites for
-   localized changes.
+   localized changes. A patch that doesn't match the file's real content
+   exactly is retried in two stages before it's ever reported as failed:
+   `file_service.flexible_find` resolves whitespace/indentation-only
+   mismatches deterministically, and — only if that also fails — one
+   bounded follow-up call gives the model the file's actual current
+   content and asks it to redo the change.
 5. **Before anything is written**, `ReviewAgent` scores the proposed files.
    Below the configured threshold (`review_score_threshold` in
    `backend/app/core/config.py`), the write is held back and the issues are
-   shown to you instead — say "apply anyway" to force it through. Small,
+   shown to you instead — say "apply anyway" to force it through. This
+   actually reapplies the specific rejected proposal (files, edits,
+   whichever it was) rather than re-running the pipeline on the phrase
+   "apply anyway" itself, which carries no information about what to
+   change. Small,
    localized changes are applied as a minimal search/replace patch (even if
    the model handed back a full-file rewrite) so the rest of the file's
    formatting stays byte-identical; "remove this component" deletes the
@@ -246,6 +255,12 @@ none are dead weight.
 - **Abuse limits** on `/chat/send`: messages over `max_message_length`
   (20,000 chars by default) are rejected with `400`; a per-project in-memory
   rate limit (`chat_rate_limit_per_minute`, default 30/min) returns `429`.
+- **Patch reliability**: search/replace edits that don't match verbatim get
+  a whitespace-normalized retry, then one bounded LLM repair round, before
+  ever being reported as failed — see `Orchestrator._repair_unresolved_patches`
+  and `file_service.flexible_find`. Review-rejected proposals are held onto
+  per-project so "apply anyway" reapplies the actual proposal instead of
+  re-running the pipeline on that phrase alone.
 
 ---
 

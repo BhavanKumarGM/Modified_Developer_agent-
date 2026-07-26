@@ -169,6 +169,68 @@ def minimal_edit_from_rewrite(
     return search, replacement
 
 
+def flexible_find(content: str, search: str) -> Optional[str]:
+    """Resolve a search/replace patch's `search` text against `content`
+    even when it doesn't match verbatim, by retrying after collapsing runs
+    of whitespace to a single space on both sides. This is the single most
+    common way EditingAgent's search/replace patches fail in practice — a
+    small model reproducing "the same" code with different indentation or
+    line breaks — and previously caused a silent, unrecoverable "Could not
+    apply patch" with no fallback.
+
+    Returns the exact substring of `content` (preserving its original
+    whitespace) that the normalized `search` corresponds to, so the caller
+    can do a normal `content.replace(result, replacement, 1)`. Returns None
+    if `search` is empty, doesn't match even after normalizing, or matches
+    more than once (ambiguous — same uniqueness bar as an exact match).
+    """
+    if not search:
+        return None
+    if search in content:
+        return search  # already exact — nothing to resolve
+
+    def _normalize_with_map(s: str) -> tuple[str, list[int]]:
+        """Collapse whitespace runs to a single space; index_map[i] is the
+        position in `s` that normalized character i came from."""
+        out: list[str] = []
+        index_map: list[int] = []
+        prev_ws = False
+        for i, ch in enumerate(s):
+            if ch.isspace():
+                if not prev_ws:
+                    out.append(" ")
+                    index_map.append(i)
+                prev_ws = True
+            else:
+                out.append(ch)
+                index_map.append(i)
+                prev_ws = False
+        normalized = "".join(out).strip()
+        # .strip() may have dropped a leading/trailing normalized space —
+        # trim the map to match so index_map stays aligned to `normalized`.
+        if out and out[0] == " ":
+            index_map = index_map[1:]
+        if out and out[-1] == " " and len(index_map) == len(out):
+            index_map = index_map[:-1]
+        return normalized, index_map
+
+    norm_content, content_map = _normalize_with_map(content)
+    norm_search, _ = _normalize_with_map(search)
+    if not norm_search:
+        return None
+
+    first = norm_content.find(norm_search)
+    if first == -1:
+        return None
+    if norm_content.find(norm_search, first + 1) != -1:
+        return None  # ambiguous — matches more than once after normalizing
+
+    norm_end = first + len(norm_search)
+    orig_start = content_map[first]
+    orig_end = content_map[norm_end - 1] + 1
+    return content[orig_start:orig_end]
+
+
 def _detect_language(suffix: str) -> str:
     mapping = {
         ".ts": "typescript", ".tsx": "typescript",
