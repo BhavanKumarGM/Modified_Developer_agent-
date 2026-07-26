@@ -8,9 +8,16 @@ one well-tested template beats three half-tested ones.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, AsyncIterator
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
+
+# Matches a module-level (unindented) `db.create_all()` call — the exact
+# pattern that crashes at import time with "Working outside of application
+# context." An indented call (already inside `with app.app_context():` or a
+# function) is left untouched since it won't match at column 0.
+_BARE_CREATE_ALL_RE = re.compile(r"^db\.create_all\(\)[ \t]*$", re.MULTILINE)
 
 SYSTEM_PROMPT = """You are the Backend Generation Agent for WebForge AI.
 
@@ -31,7 +38,7 @@ RULES:
 2. Always include a `requirements.txt` listing every third-party import used (flask, flask-cors, flask-sqlalchemy, etc.), one per line, unpinned or with a minimum version (e.g. `flask>=3.0`).
 3. Always add CORS support (`from flask_cors import CORS` + `CORS(app)`) so a separately-served frontend (e.g. a Vite dev server on another port) can call this API during local development. Add `flask-cors` to requirements.txt whenever you do.
 4. Generate COMPLETE, WORKING code. No TODOs, no placeholders, no "# implement this".
-5. Prefer simple, explicit routes (`@app.route(...)`) with clear JSON request/response bodies. Use in-memory data structures unless the user's request implies persistence, in which case use flask-sqlalchemy with SQLite (a file-based db needs no separate server).
+5. Prefer simple, explicit routes (`@app.route(...)`) with clear JSON request/response bodies. Use in-memory data structures unless the user's request implies persistence, in which case use flask-sqlalchemy with SQLite (a file-based db needs no separate server). If you use flask-sqlalchemy, NEVER call `db.create_all()` at module level — it raises "Working outside of application context" at import time. Wrap it: `with app.app_context():\n    db.create_all()`.
 6. Include basic input validation and appropriate HTTP status codes (400/404/etc.) — don't let bad input crash the process.
 7. You may split routes/models into extra files (e.g. `models.py`, `routes.py`) imported from app.py if the API is large, but a single `app.py` is preferred for anything simple.
 8. Never write frontend files (no .tsx/.jsx/.html templates) unless the user explicitly asks for server-rendered HTML — this agent's output is an API.
@@ -69,6 +76,7 @@ Output ONLY the JSON object. Start with {{ and end with }}."""
         try:
             data = self._extract_json(response.content)
             files = data.get("files", [])
+            files = self._fix_unwrapped_create_all(files)
             data["files"] = self._ensure_critical_files(files)
 
             paths = [f["path"] for f in data["files"]]
@@ -95,6 +103,20 @@ Be specific. Then write "⚡ Generating backend now…" on a new line."""
         )
         async for token in self.llm.stream(request):
             yield token
+
+    def _fix_unwrapped_create_all(self, files: list[dict]) -> list[dict]:
+        """Deterministic safety net for a real bug seen live: models still
+        sometimes emit a module-level `db.create_all()` despite the system
+        prompt rule against it, which crashes the app at import time with
+        "Working outside of application context." Rather than trust the
+        prompt alone, rewrite the pattern if it slips through."""
+        for f in files:
+            content = f.get("content", "")
+            if content and _BARE_CREATE_ALL_RE.search(content):
+                f["content"] = _BARE_CREATE_ALL_RE.sub(
+                    "with app.app_context():\n    db.create_all()", content
+                )
+        return files
 
     def _ensure_critical_files(self, files: list[dict]) -> list[dict]:
         """Ensure app.py and requirements.txt exist even if the model

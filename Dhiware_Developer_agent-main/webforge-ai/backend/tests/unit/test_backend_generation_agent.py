@@ -62,3 +62,55 @@ async def test_run_handles_unparseable_json():
     result = await agent.run("build something", _context())
     assert result.success is False
     assert result.error
+
+
+# ── db.create_all() app-context safety net ─────────────────────────────────
+# Reproduces a real bug found via live testing: a model-generated Flask +
+# flask-sqlalchemy app calling `db.create_all()` at module level crashes at
+# import time with "Working outside of application context." — the process
+# never gets far enough to bind the port, and PreviewAgent reports a bare
+# timeout instead of the real cause.
+
+@pytest.mark.asyncio
+async def test_run_wraps_module_level_create_all_in_app_context():
+    payload = {
+        "files": [
+            {"path": "app.py", "content": (
+                "from flask import Flask\n"
+                "from flask_sqlalchemy import SQLAlchemy\n\n"
+                "app = Flask(__name__)\n"
+                "db = SQLAlchemy(app)\n\n"
+                "db.create_all()\n\n"
+                "@app.route('/')\n"
+                "def index():\n"
+                "    return 'ok'\n"
+            )},
+            {"path": "requirements.txt", "content": "flask>=3.0\nflask-sqlalchemy>=3.0\n"},
+        ],
+        "framework": "flask",
+    }
+    agent = BackendGenerationAgent(llm=FakeLLM(json.dumps(payload)))
+    result = await agent.run("build a todo API with sqlalchemy", _context())
+
+    app_file = next(f for f in result.data["files"] if f["path"] == "app.py")
+    lines = app_file["content"].splitlines()
+    assert "db.create_all()" not in lines  # no unindented (module-level) call remains
+    assert "with app.app_context():\n    db.create_all()" in app_file["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_leaves_already_wrapped_create_all_untouched():
+    original = (
+        "from flask import Flask\n"
+        "from flask_sqlalchemy import SQLAlchemy\n\n"
+        "app = Flask(__name__)\n"
+        "db = SQLAlchemy(app)\n\n"
+        "with app.app_context():\n"
+        "    db.create_all()\n"
+    )
+    payload = {"files": [{"path": "app.py", "content": original}], "framework": "flask"}
+    agent = BackendGenerationAgent(llm=FakeLLM(json.dumps(payload)))
+    result = await agent.run("build something", _context())
+
+    app_file = next(f for f in result.data["files"] if f["path"] == "app.py")
+    assert app_file["content"] == original
