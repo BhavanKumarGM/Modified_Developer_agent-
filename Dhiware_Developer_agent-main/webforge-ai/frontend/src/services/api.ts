@@ -83,7 +83,13 @@ export const api = {
 
   preview: {
     start: (projectId: string) =>
-      request<{ port: number; url: string }>(`/preview/start/${projectId}`, { method: 'POST', timeout: 240000 }),
+      request<{
+        port: number
+        url: string
+        backendPort: number | null
+        backendUrl: string | null
+        backendFramework: string | null
+      }>(`/preview/start/${projectId}`, { method: 'POST', timeout: 240000 }),
     stop: (projectId: string) =>
       request<void>(`/preview/stop/${projectId}`, { method: 'POST' }),
   },

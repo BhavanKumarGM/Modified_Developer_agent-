@@ -15,6 +15,7 @@ from app.agents.base_agent import AgentContext
 from app.agents.conversation_agent import ConversationAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.code_generation_agent import CodeGenerationAgent
+from app.agents.backend_generation_agent import BackendGenerationAgent
 from app.agents.editing_agent import EditingAgent
 from app.agents.repository_agent import RepositoryAgent
 from app.agents.search_agent import SearchAgent
@@ -38,7 +39,7 @@ EventCallback = Callable[[str, dict], None]
 # "refactoring" and "debug" both route through EditingAgent/DebugAgent via
 # _handle_editing with the matching intent; "review"/"repository"/"search"
 # are handled as standalone informational tasks.
-KNOWN_TASK_AGENTS = {"codegen", "editing", "refactoring", "debug", "review", "repository", "search"}
+KNOWN_TASK_AGENTS = {"codegen", "backend", "editing", "refactoring", "debug", "review", "repository", "search"}
 
 _TASK_AGENT_TO_INTENT = {
     "codegen": "build",
@@ -55,6 +56,7 @@ class Orchestrator:
         self.conversation = ConversationAgent(llm_service)
         self.planner = PlannerAgent(llm_service)
         self.codegen = CodeGenerationAgent(llm_service)
+        self.backend_codegen = BackendGenerationAgent(llm_service)
         self.editing = EditingAgent(llm_service)
         self.repository = RepositoryAgent(llm_service)
         self.search = SearchAgent(llm_service)
@@ -239,6 +241,11 @@ class Orchestrator:
 
             if agent_name == "codegen":
                 async for token in self._handle_generation(
+                    context, action, plan, message_id, emit_done=False, force_apply=force_apply
+                ):
+                    yield token
+            elif agent_name == "backend":
+                async for token in self._handle_backend_generation(
                     context, action, plan, message_id, emit_done=False, force_apply=force_apply
                 ):
                     yield token
@@ -494,6 +501,90 @@ class Orchestrator:
             yield summary
 
             # Update file events
+            for f in files:
+                self._emit(context.project_id, "file_created", {"path": f["path"]})
+
+            await self._update_memory(context, task, files)
+
+        if emit_done:
+            self._emit(context.project_id, "stream_done", {"messageId": message_id})
+
+    def _backend_prefix(self, root: Path) -> str:
+        """Where generated Flask files should land. A project that already
+        has a frontend (package.json / src/) keeps the backend under
+        backend/ so the two don't collide on the project root; a bare
+        Python-only project gets its files at the root, matching how a
+        plain Flask repo is normally laid out (and how backend_detect.py
+        looks for it)."""
+        if (root / "package.json").exists() or (root / "src").exists():
+            return "backend"
+        return ""
+
+    async def _handle_backend_generation(
+        self,
+        context: AgentContext,
+        task: str,
+        plan: dict,
+        message_id: str,
+        emit_done: bool = True,
+        force_apply: bool = False,
+    ) -> AsyncIterator[str]:
+        """Full Python (Flask) backend generation pipeline — mirrors
+        _handle_generation but targets BackendGenerationAgent and (for
+        full-stack projects) namespaces output under backend/ so it never
+        collides with the React frontend's src/."""
+        self._emit(context.project_id, "agent_status", {
+            "agent": "backend", "status": "thinking", "task": "Planning backend structure"
+        })
+
+        async for token in self.backend_codegen.stream(task, context, plan=plan):
+            self._emit(context.project_id, "stream_token", {"token": token, "messageId": message_id})
+            yield token
+
+        self._emit(context.project_id, "agent_status", {
+            "agent": "backend", "status": "working", "task": "Generating backend files"
+        })
+        gen_result = await self.backend_codegen.run(task, context, plan=plan)
+
+        if gen_result.success and gen_result.data.get("files"):
+            files = gen_result.data["files"]
+
+            if context.root_path:
+                prefix = self._backend_prefix(Path(context.root_path))
+                if prefix:
+                    for f in files:
+                        p = (f.get("path") or "").lstrip("/").replace("\\", "/")
+                        if p and not p.startswith(f"{prefix}/"):
+                            f["path"] = f"{prefix}/{p}"
+
+            if not force_apply:
+                approved, review_msg = await self._review_files(context, task, files)
+                if not approved:
+                    self._emit(context.project_id, "stream_token", {"token": review_msg, "messageId": message_id})
+                    yield review_msg
+                    if emit_done:
+                        self._emit(context.project_id, "stream_done", {"messageId": message_id})
+                    return
+
+            async with self._get_write_lock(context.project_id):
+                written_paths = await self._write_files(context.root_path, files)
+
+            self._emit(context.project_id, "agent_status", {
+                "agent": "git", "status": "working", "task": "Creating snapshot"
+            })
+            await self.git.run("snapshot", context, action="snapshot", changes=written_paths)
+
+            self._emit(context.project_id, "agent_status", {"agent": "backend", "status": "done"})
+
+            summary = f"\n\n✅ **Generated {len(files)} backend file(s)** successfully.\n"
+            summary += "\n".join(f"- `{f['path']}`" for f in files[:10])
+            if len(files) > 10:
+                summary += f"\n- ...and {len(files) - 10} more files"
+            summary += "\n\nClick **Run** in the preview panel to install dependencies and start the backend."
+
+            self._emit(context.project_id, "stream_token", {"token": summary, "messageId": message_id})
+            yield summary
+
             for f in files:
                 self._emit(context.project_id, "file_created", {"path": f["path"]})
 

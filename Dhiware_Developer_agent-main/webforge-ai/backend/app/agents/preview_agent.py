@@ -9,12 +9,14 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent, AgentContext, AgentResult
 from app.core.config import settings
+from app.services.backend_detect import BackendInfo, FRAMEWORK_PACKAGES, detect_backend
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -104,6 +106,67 @@ def _find_imported_packages(root: Path) -> set[str]:
             if name:
                 packages.add(name)
     return packages
+
+# ── Python dependency auto-detection ────────────────────────────────────────
+# Same problem as the npm side above, for Python: an imported or generated
+# backend can import a third-party package that's missing from
+# requirements.txt (or there's no requirements.txt at all — common in
+# ad-hoc/imported repos). Rather than let pip install succeed on an
+# incomplete set and then watch the server crash with ModuleNotFoundError
+# the first time a route runs, reconcile actual imports against installed
+# packages before ever starting the process.
+
+_STDLIB_MODULES: frozenset[str] = frozenset(getattr(sys, "stdlib_module_names", ()))
+
+# Import name -> real PyPI distribution name, for the common cases where
+# they differ. Unlisted names are installed under their import name as-is
+# (mirrors KNOWN_PACKAGE_VERSIONS's "latest" fallback on the npm side).
+PIP_PACKAGE_ALIASES: dict[str, str] = {
+    "dotenv": "python-dotenv",
+    "PIL": "pillow",
+    "cv2": "opencv-python",
+    "yaml": "pyyaml",
+    "bs4": "beautifulsoup4",
+    "jwt": "pyjwt",
+    "dateutil": "python-dateutil",
+    "flask_cors": "flask-cors",
+    "flask_sqlalchemy": "flask-sqlalchemy",
+    "flask_migrate": "flask-migrate",
+    "sklearn": "scikit-learn",
+    "google": "google-api-python-client",
+    "OpenSSL": "pyopenssl",
+}
+
+_PY_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+_IGNORE_PY_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "env", "dist", "build"}
+
+
+def _find_imported_pip_packages(root: Path) -> set[str]:
+    """Scan shallow .py files for top-level `import x` / `from x import y`
+    and return the ones that look like third-party packages: not stdlib,
+    and not a same-project local module/package (checked against root-level
+    .py files and packages, since detection itself is bounded to a shallow
+    scan — see backend_detect.py)."""
+    local_names = {p.stem for p in root.glob("*.py")}
+    for p in root.iterdir():
+        if p.is_dir() and (p / "__init__.py").exists():
+            local_names.add(p.name)
+
+    packages: set[str] = set()
+    for path in root.rglob("*.py"):
+        if any(part in _IGNORE_PY_DIRS for part in path.relative_to(root).parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for match in _PY_IMPORT_RE.finditer(text):
+            name = match.group(1)
+            if name in _STDLIB_MODULES or name in local_names:
+                continue
+            packages.add(PIP_PACKAGE_ALIASES.get(name, name))
+    return packages
+
 
 # ── Canonical config templates (always written — never patched) ────────────────
 
@@ -248,6 +311,8 @@ class PreviewAgent(BaseAgent):
 
     _processes: dict[str, subprocess.Popen] = {}
     _ports: dict[str, int] = {}
+    _backend_processes: dict[str, subprocess.Popen] = {}
+    _backend_ports: dict[str, int] = {}
     _executor = ThreadPoolExecutor(max_workers=4)
 
     async def run(self, task: str, context: AgentContext, **kwargs: Any) -> AgentResult:
@@ -263,9 +328,65 @@ class PreviewAgent(BaseAgent):
             return AgentResult(success=False, error="No project root")
 
         project_id = context.project_id
-        root = Path(context.root_path)
+        # project.rootPath is stored relative to the backend process's cwd
+        # (see project_service). Resolve to absolute before it's ever used
+        # as a subprocess target path (venv creation) *and* as that same
+        # subprocess's cwd — two relative paths combined that way resolve
+        # inconsistently (venv landing under projects/projects/<id>/.venv
+        # instead of projects/<id>/.venv).
+        root = Path(context.root_path).resolve()
 
         await self._stop(project_id)
+
+        backend_info = detect_backend(root)
+        python_only = bool(backend_info) and self._looks_like_python_only_project(root)
+
+        backend_result: Optional[AgentResult] = None
+        if backend_info:
+            backend_result = await self._start_backend(project_id, root, backend_info)
+            if not backend_result.success:
+                return backend_result
+            if python_only:
+                return backend_result
+
+        frontend_result = await self._start_frontend(context, root)
+        if not frontend_result.success:
+            if backend_info:
+                await self._stop_backend(project_id)
+            return frontend_result
+
+        if backend_result:
+            merged = {
+                **frontend_result.data,
+                "backendPort": backend_result.data["port"],
+                "backendUrl": backend_result.data["url"],
+                "backendFramework": backend_info.framework,
+            }
+            return AgentResult(
+                success=True,
+                content=f"{frontend_result.content} | Backend ({backend_info.framework}) running at {backend_result.data['url']}",
+                data=merged,
+            )
+        return frontend_result
+
+    def _looks_like_python_only_project(self, root: Path) -> bool:
+        """True when there is no evidence of a frontend at all — a plain
+        imported/generated Python backend with nothing for Vite to serve.
+        Used to skip the npm/vite pipeline entirely rather than scaffold a
+        fake React shell in front of a real backend."""
+        if (root / "package.json").exists():
+            return False
+        if (root / "index.html").exists():
+            return False
+        src = root / "src"
+        if src.exists():
+            for ext in ("*.tsx", "*.jsx", "*.ts", "*.js"):
+                if next(src.rglob(ext), None) is not None:
+                    return False
+        return True
+
+    async def _start_frontend(self, context: AgentContext, root: Path) -> AgentResult:
+        project_id = context.project_id
 
         port = await self._find_port()
         if not port:
@@ -356,14 +477,30 @@ class PreviewAgent(BaseAgent):
                     process.kill()
             except Exception:
                 pass
+        await self._stop_backend(project_id)
         return AgentResult(success=True, content="Preview stopped")
 
+    async def _stop_backend(self, project_id: str) -> None:
+        process = self._backend_processes.pop(project_id, None)
+        self._backend_ports.pop(project_id, None)
+        if process:
+            try:
+                process.terminate()
+                await asyncio.sleep(0.5)
+                if process.poll() is None:
+                    process.kill()
+            except Exception:
+                pass
+
     async def stop_all(self) -> None:
-        """Terminate every still-running dev server. Called on backend
-        shutdown so a restart doesn't leave orphaned `npm run dev`
-        processes holding preview ports open."""
+        """Terminate every still-running dev server (frontend and Python
+        backend). Called on backend shutdown so a restart doesn't leave
+        orphaned `npm run dev` / Flask/Django/uvicorn processes holding
+        preview ports open."""
         for project_id in list(self._processes.keys()):
             await self._stop(project_id)
+        for project_id in list(self._backend_processes.keys()):
+            await self._stop_backend(project_id)
 
     # ── Source migration ───────────────────────────────────────────────────────
 
@@ -585,7 +722,7 @@ class PreviewAgent(BaseAgent):
         return "".join(lines)
 
     async def _find_port(self) -> Optional[int]:
-        used = set(self._ports.values())
+        used = set(self._ports.values()) | set(self._backend_ports.values())
         for port in range(settings.preview_port_start, settings.preview_port_end):
             if port in used:
                 continue
@@ -593,3 +730,142 @@ class PreviewAgent(BaseAgent):
                 if s.connect_ex(("localhost", port)) != 0:
                     return port
         return None
+
+    # ── Python backend execution ────────────────────────────────────────────────
+    # Every supported framework (Flask/Django/FastAPI) is launched through its
+    # own dev-server CLI (flask run / manage.py runserver / uvicorn) rather than
+    # `python <entry_file>` — that's the one launch style where the port is
+    # controlled by a flag we pass, regardless of whatever the source file's
+    # own `app.run(...)` call (if any) hardcodes. This matters most for
+    # imported repos we don't control, e.g. a cloned Flask app is not ours to
+    # edit just so it listens on the port we picked.
+
+    def _venv_paths(self, root: Path) -> tuple[Path, Path]:
+        venv_dir = root / ".venv"
+        if IS_WINDOWS:
+            python = venv_dir / "Scripts" / "python.exe"
+        else:
+            python = venv_dir / "bin" / "python"
+        return venv_dir, python
+
+    def _ensure_venv(self, root: Path) -> Path:
+        """Create an isolated venv under <project>/.venv if missing. Returns
+        the venv's python executable path. Isolated per project so one
+        project's dependencies never leak into or collide with another's."""
+        venv_dir, venv_python = self._venv_paths(root)
+        if not venv_python.exists():
+            base_python = shutil.which("python") or shutil.which("python3")
+            if not base_python:
+                raise FileNotFoundError("No 'python' executable found on PATH to create a virtualenv.")
+            result = subprocess.run(
+                [base_python, "-m", "venv", str(venv_dir)],
+                cwd=str(root),
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to create virtualenv:\n{(result.stdout or '') + (result.stderr or '')}")
+        return venv_python
+
+    def _install_python_deps(self, root: Path, venv_python: Path, framework: str) -> tuple[int, str]:
+        requirements = root / "requirements.txt"
+        declared: set[str] = set()
+        if requirements.exists():
+            try:
+                for line in requirements.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        declared.add(re.split(r"[<>=!\[;\s]", line, 1)[0].lower())
+            except Exception:
+                pass
+
+        packages = set(FRAMEWORK_PACKAGES.get(framework, []))
+        for name in _find_imported_pip_packages(root):
+            if name.lower() not in declared:
+                packages.add(name)
+
+        args = [str(venv_python), "-m", "pip", "install", "--disable-pip-version-check", "-q"]
+        if requirements.exists():
+            args += ["-r", str(requirements)]
+        args += sorted(packages)
+        result = subprocess.run(
+            args,
+            cwd=str(root),
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+    def _build_backend_run_command(self, venv_python: Path, info: BackendInfo, port: int) -> tuple[list[str], dict[str, str]]:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        if info.framework == "flask":
+            flask_app = info.app_module if info.app_var in ("app", "application") else f"{info.app_module}:{info.app_var}"
+            env["FLASK_APP"] = flask_app
+            env["FLASK_DEBUG"] = "0"
+            cmd = [str(venv_python), "-m", "flask", "run", "--host", "127.0.0.1", "--port", str(port)]
+        elif info.framework == "django":
+            cmd = [str(venv_python), info.entry_file, "runserver", f"127.0.0.1:{port}", "--noreload"]
+        elif info.framework == "fastapi":
+            target = f"{info.app_module}:{info.app_var}"
+            cmd = [str(venv_python), "-m", "uvicorn", target, "--host", "127.0.0.1", "--port", str(port)]
+        else:
+            raise ValueError(f"Unsupported backend framework: {info.framework}")
+        return cmd, env
+
+    async def _start_backend(self, project_id: str, root: Path, info: BackendInfo) -> AgentResult:
+        port = await self._find_port()
+        if not port:
+            return AgentResult(success=False, error="No available ports in range")
+
+        try:
+            venv_python = await asyncio.get_event_loop().run_in_executor(
+                self._executor, lambda: self._ensure_venv(root)
+            )
+        except Exception as e:
+            return AgentResult(success=False, error=f"Could not create virtualenv: {e}")
+
+        try:
+            returncode, output = await asyncio.get_event_loop().run_in_executor(
+                self._executor, lambda: self._install_python_deps(root, venv_python, info.framework)
+            )
+            if returncode != 0:
+                return AgentResult(success=False, error=f"pip install failed:\n{output[-1500:]}")
+        except Exception as e:
+            return AgentResult(success=False, error=f"pip install error: {e}")
+
+        try:
+            cmd, env = self._build_backend_run_command(venv_python, info, port)
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(root),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                text=True,
+                bufsize=1,
+            )
+            self._backend_processes[project_id] = process
+            self._backend_ports[project_id] = port
+
+            ready = await self._wait_for_port(port, timeout=45, process=process)
+            if not ready:
+                output = self._drain_output(process)
+                return AgentResult(
+                    success=False,
+                    error=f"{info.framework} server did not open port {port} within 45 s.\n\n{output[-1200:]}",
+                )
+
+            url = f"http://127.0.0.1:{port}"
+            self.logger.info(f"Backend ({info.framework}) preview ready → {url}")
+            return AgentResult(
+                success=True,
+                content=f"Backend running at {url}",
+                data={"port": port, "url": url, "framework": info.framework},
+            )
+        except Exception as e:
+            return AgentResult(success=False, error=str(e))

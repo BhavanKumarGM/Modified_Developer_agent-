@@ -1,9 +1,9 @@
 # WebForge AI
 
-A **local-first AI-assisted React + Vite + TypeScript frontend generator**.
-Describe what you want to build, and WebForge AI generates a complete React
-project — with live preview, file editor, and iterative AI editing. No cloud
-AI, no API keys, no cost.
+A **local-first AI-assisted full-stack generator**: React + Vite + TypeScript
+frontends, and Python (Flask/Django/FastAPI) backends. Describe what you want
+to build, and WebForge AI generates a complete project — with live preview,
+file editor, and iterative AI editing. No cloud AI, no API keys, no cost.
 
 ![WebForge AI](https://img.shields.io/badge/AI-Local%20Only-green) ![Ollama](https://img.shields.io/badge/Ollama-qwen2.5--coder%3A7b-blue) ![React](https://img.shields.io/badge/Frontend-React%2018-61DAFB) ![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688)
 
@@ -12,15 +12,28 @@ AI, no API keys, no cost.
 ## Scope — what this actually does (and doesn't)
 
 WebForge AI generates and edits **React 18 + Vite + TypeScript + Tailwind**
-frontend code. That's it, deliberately:
+frontend code, and can now also generate, install, and run a **Python (Flask)
+backend**. That's the deliberate boundary:
 
 - ✅ Generates full React/Vite/TS frontend projects from a prompt
+- ✅ Generates a Python **Flask** backend (routes, models, `requirements.txt`)
+  from a prompt — standalone or alongside a generated frontend (written to
+  `backend/` when a frontend already exists, so the two never collide)
 - ✅ Edits, refactors, and debugs React/TS/JS/CSS files in an existing project
+- ✅ Detects and **runs** an existing Python backend — Flask, Django, or
+  FastAPI — whether it was AI-generated or imported from GitHub/ZIP: creates
+  an isolated per-project virtualenv, installs `requirements.txt` plus the
+  detected framework, and launches it through the framework's own dev-server
+  CLI (`flask run` / `manage.py runserver` / `uvicorn`) so the port WebForge
+  picks is always honored, even for imported code it doesn't control
 - ✅ Analyzes an *uploaded* project of any framework well enough to describe
   its structure (`RepositoryAgent` can detect Next.js/Vue/Angular, list its
-  routing/state-management choices, etc.) — but generation/editing beyond
-  that analysis only works on React/Vite/TS code
-- ❌ Does **not** generate backend APIs, databases, or authentication
+  routing/state-management choices, etc.) — but frontend generation/editing
+  beyond that analysis only works on React/Vite/TS code
+- ❌ Does **not** generate Django or FastAPI backend *code* (only Flask;
+  Django/FastAPI projects can still be detected, installed, and run)
+- ❌ Does **not** generate authentication, deployment configuration, or
+  database migrations beyond a basic SQLite model if the AI chooses one
 - ❌ Does **not** generate or scaffold Next.js, Vue, or Angular projects
 - ❌ Does **not** produce Docker/deployment configuration
 
@@ -32,8 +45,9 @@ something silently half-implemented behind this README.
 ## Features
 
 - **Prompt → Website** — describe your app in plain English, get a full React/Vite/TS project
+- **Prompt → Backend** — ask for an API/server and get a runnable Flask backend (routes, models, `requirements.txt`)
 - **ZIP Upload** — upload existing code, AI analyses the structure, continue developing
-- **Live Preview** — embedded Vite dev server with real-time iframe preview
+- **Live Preview** — embedded Vite dev server with real-time iframe preview; Python backends run alongside it in an isolated per-project virtualenv
 - **AI Code Editor** — Monaco editor (VS Code engine) with file explorer
 - **Iterative Editing** — ask the AI to modify any part of your code
 - **Git Snapshots** — automatic checkpoints after every generation
@@ -175,16 +189,22 @@ FastAPI Backend
 Ollama (local AI — port 11434)
 ```
 
-**11 agents**, all invoked from `Orchestrator` (`backend/app/orchestrator/orchestrator.py`):
-`PlannerAgent`, `CodeGenerationAgent`, `EditingAgent`, `ConversationAgent`,
-`SearchAgent`, `PreviewAgent`, `RepositoryAgent`, `DebugAgent`, `ReviewAgent`,
-`GitAgent`, `MemoryAgent`. Every one of them is wired into a real code path —
-none are dead weight.
+**12 agents**, all invoked from `Orchestrator` (`backend/app/orchestrator/orchestrator.py`):
+`PlannerAgent`, `CodeGenerationAgent`, `BackendGenerationAgent`, `EditingAgent`,
+`ConversationAgent`, `SearchAgent`, `PreviewAgent`, `RepositoryAgent`,
+`DebugAgent`, `ReviewAgent`, `GitAgent`, `MemoryAgent`. Every one of them is
+wired into a real code path — none are dead weight.
 
-**3 Workflows**:
+`PreviewAgent` also owns Python backend execution directly (no separate
+agent): `app/services/backend_detect.py` detects Flask/Django/FastAPI by
+static inspection, then `PreviewAgent` creates an isolated `.venv`, installs
+dependencies, and launches the right dev-server CLI for the framework.
+
+**4 Workflows**:
 1. **Prompt → Website** — AI generates full React project from description
-2. **ZIP Upload** — Upload existing code, AI analyses it, you continue
-3. **Continue Development** — Ask AI to modify any generated project
+2. **Prompt → Backend** — AI generates a runnable Flask backend
+3. **ZIP Upload** — Upload existing code, AI analyses it, you continue
+4. **Continue Development** — Ask AI to modify any generated project
 
 ---
 
@@ -194,10 +214,16 @@ none are dead weight.
 2. **PlannerAgent** classifies intent (`build` / `edit` / `refactor` / `debug`
    / `conversation`) and, when it can, produces an ordered `tasks[]` plan.
    The orchestrator dispatches each task to its named agent
-   (`codegen|editing|refactoring|debug|review|repository|search`) in
+   (`codegen|backend|editing|refactoring|debug|review|repository|search`) in
    priority order; if the plan is empty or malformed, it falls back to a
-   single intent-based branch instead of failing.
+   single intent-based branch instead of failing. A request for "an API" or
+   "a backend" gets a `backend` task, dispatched to `BackendGenerationAgent`
+   — both a `codegen` and a `backend` task can appear in the same plan for a
+   full-stack request.
 3. For **build**: `CodeGenerationAgent` generates all `src/` files as JSON.
+   `BackendGenerationAgent` does the same for a Flask backend (`app.py`,
+   `requirements.txt`, etc.) — written to the project root if there's no
+   frontend yet, or under `backend/` if there is, so the two never collide.
 4. For **edit/refactor/debug**: `SearchAgent` finds relevant files using a
    local semantic index (chunked + embedded via Ollama's `nomic-embed-text`,
    stored in a per-project `sqlite-vec` index — see `app/services/search_index.py`)
@@ -227,7 +253,16 @@ none are dead weight.
    codegen/editing prompts include that memory so style stays consistent.
 8. **PreviewAgent** starts a Vite dev server with canonical configs (never
    trusts LLM config output). Live preview appears in the iframe; file tree
-   refreshes automatically.
+   refreshes automatically. If the project also has a Python backend
+   (`app/services/backend_detect.py` finds a Flask/Django/FastAPI entry
+   point — AI-generated or imported), PreviewAgent creates an isolated
+   `.venv` under the project, installs `requirements.txt` plus the detected
+   framework, and launches it through the framework's own dev-server CLI
+   (`flask run` / `manage.py runserver` / `uvicorn ... --port`) so the port
+   WebForge picks is honored regardless of what the source hardcodes. A
+   bare backend project (no frontend files at all) runs backend-only and
+   its URL becomes the preview; a full-stack project runs both, and the
+   backend's URL is surfaced next to the preview toolbar.
 
 ---
 
@@ -242,7 +277,8 @@ none are dead weight.
   `_write_files`/`_apply_edits`, so two concurrent edits to the same project
   can't interleave writes to the same file.
 - **Clean shutdown**: closes the shared `httpx` client and terminates every
-  still-running `npm run dev` preview process instead of leaving them orphaned.
+  still-running `npm run dev` preview process *and* Python backend process
+  (Flask/Django/uvicorn) instead of leaving them orphaned.
 - **Abuse limits** on `/chat/send`: messages over `max_message_length`
   (20,000 chars by default) are rejected with `400`; a per-project in-memory
   rate limit (`chat_rate_limit_per_minute`, default 30/min) returns `429`.
@@ -273,7 +309,7 @@ local dev server, not a multi-tenant service:
 ## Testing & CI
 
 ```bash
-cd backend && pytest tests/ -v          # 97 tests: security, orchestration, reliability, search
+cd backend && pytest tests/ -v          # 136 tests: security, orchestration, reliability, search, backend execution
 cd frontend && npm test                 # 27 tests: Zustand stores + api.ts error handling
 ```
 

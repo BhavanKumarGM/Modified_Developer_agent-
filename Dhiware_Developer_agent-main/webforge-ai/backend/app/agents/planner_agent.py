@@ -18,7 +18,7 @@ Output ONLY valid JSON with this shape:
   "summary": "Brief description of what will be done",
   "tasks": [
     {
-      "agent": "codegen|editing|refactoring|debug|review|repository|search",
+      "agent": "codegen|backend|editing|refactoring|debug|review|repository|search",
       "action": "specific action description",
       "files": ["optional list of target files"],
       "priority": 1
@@ -32,6 +32,7 @@ Rules:
 - "edit" → target specific files, never regenerate entire project
 - Order tasks by dependency (lower priority number = runs first)
 - Keep tasks atomic and specific
+- "codegen" generates the React/TypeScript frontend. "backend" generates a Python (Flask) backend — use it whenever the user asks for an API, server, database-backed feature, authentication, or explicitly says "backend"/"Flask"/"server-side". A request for "a to-do app with a backend" should include BOTH a "codegen" task and a "backend" task.
 """
 
 

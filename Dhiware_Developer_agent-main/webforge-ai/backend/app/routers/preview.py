@@ -41,7 +41,13 @@ async def start_preview(project_id: str, db: AsyncSession = Depends(get_db)):
     url = result.data.get("url")
     await project_service.update_project(db, project_id, preview_port=port)
 
-    return {"port": port, "url": url}
+    return {
+        "port": port,
+        "url": url,
+        "backendPort": result.data.get("backendPort"),
+        "backendUrl": result.data.get("backendUrl"),
+        "backendFramework": result.data.get("backendFramework") or result.data.get("framework"),
+    }
 
 
 @router.post("/stop/{project_id}")

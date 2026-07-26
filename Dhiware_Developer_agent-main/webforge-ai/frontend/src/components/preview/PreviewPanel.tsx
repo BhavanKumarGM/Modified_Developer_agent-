@@ -22,6 +22,8 @@ export function PreviewPanel() {
   const { deviceMode } = useUIStore()
   const activeProject = useProjectStore((s) => s.activeProject)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [backendUrl, setBackendUrl] = useState<string | null>(null)
+  const [backendFramework, setBackendFramework] = useState<string | null>(null)
   const [status, setStatus] = useState<PreviewStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
@@ -31,6 +33,8 @@ export function PreviewPanel() {
 
   useEffect(() => {
     setPreviewUrl(null)
+    setBackendUrl(null)
+    setBackendFramework(null)
     setStatus('idle')
     setError(null)
     clearInterval(timerRef.current)
@@ -52,8 +56,10 @@ export function PreviewPanel() {
     startTimer()
 
     try {
-      const { url } = await api.preview.start(activeProject.id)
+      const { url, backendUrl: bUrl, backendFramework: bFramework } = await api.preview.start(activeProject.id)
       setPreviewUrl(url)
+      setBackendUrl(bUrl)
+      setBackendFramework(bFramework)
       setStatus('running')
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to start preview'
@@ -68,6 +74,8 @@ export function PreviewPanel() {
     if (!activeProject) return
     await api.preview.stop(activeProject.id).catch(() => {})
     setPreviewUrl(null)
+    setBackendUrl(null)
+    setBackendFramework(null)
     setStatus('idle')
     stopTimer()
     setElapsed(0)
@@ -102,6 +110,17 @@ export function PreviewPanel() {
             )}
           </div>
         </div>
+
+        {status === 'running' && backendUrl && (
+          <button
+            onClick={() => window.open(backendUrl, '_blank')}
+            className="hidden sm:flex items-center gap-1.5 rounded-lg bg-surface-3 border border-border-subtle px-2 py-1 text-[10px] font-mono text-text-secondary hover:border-accent/40 flex-shrink-0"
+            title={`Open ${backendFramework ?? 'backend'} server`}
+          >
+            <Terminal className="h-3 w-3 text-emerald-400" />
+            {backendFramework ?? 'backend'}
+          </button>
+        )}
 
         <DeviceSelector />
 
