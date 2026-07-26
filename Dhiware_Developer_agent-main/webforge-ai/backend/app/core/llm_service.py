@@ -20,6 +20,22 @@ from app.core.config import settings
 _RETRYABLE_EXCEPTIONS = (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError)
 
 
+def model_name_matches(target: str, available: list[str]) -> bool:
+    """True if `target` (e.g. settings.default_model) is present in
+    `available` (as returned by LLMService.list_models()).
+
+    Ollama's /api/tags always returns fully-tagged names (e.g.
+    "nomic-embed-text:latest"), but a config value is often left untagged
+    (e.g. "nomic-embed-text") — in that case a bare name matches any tag of
+    that same model.
+    """
+    if target in available:
+        return True
+    if ":" not in target:
+        return any(m == target or m.startswith(f"{target}:") for m in available)
+    return False
+
+
 @dataclass
 class LLMMessage:
     role: str  # system | user | assistant

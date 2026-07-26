@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 from pathlib import Path
 from typing import Optional
 import mimetypes
@@ -118,11 +119,36 @@ def normalize_generated_path(rel_path: str) -> str:
     return rel
 
 
+# Matches content that is ENTIRELY one markdown code fence, e.g.
+# ```tsx\nimport React ...\n``` — with nothing but the fence markers
+# themselves before/after the code. Deliberately does not touch a fence
+# that's only part of the content (that's presumably intentional, e.g. a
+# generated .md file).
+_WHOLE_CONTENT_FENCE_RE = re.compile(
+    r"^```[a-zA-Z0-9_+-]*[ \t]*\r?\n(.*)```[ \t]*$", re.DOTALL
+)
+
+
+def _strip_markdown_fence(content: str) -> str:
+    """Strip a markdown code fence that wraps the *entire* content.
+
+    LLMs are told to return pure JSON with source code in each file's
+    "content" string, but small models sometimes echo markdown formatting
+    inside that string anyway (```tsx\\n...\\n```). Written verbatim, that
+    fence becomes the first and last lines of the actual source file and
+    breaks the build with a syntax error that gives no hint the real cause
+    was a stray fence, not the code itself.
+    """
+    stripped = content.strip()
+    match = _WHOLE_CONTENT_FENCE_RE.match(stripped)
+    return match.group(1) if match else content
+
+
 def write_generated_file(root: Path, rel_path: str, content: str) -> str:
     """Normalize an LLM-generated path and write it. Returns the normalized
     relative path actually written. Raises ValueError if it escapes root."""
     rel = normalize_generated_path(rel_path)
-    write_file(root, rel, content)
+    write_file(root, rel, _strip_markdown_fence(content))
     return rel
 
 

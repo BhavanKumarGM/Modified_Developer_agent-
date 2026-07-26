@@ -6,7 +6,12 @@ import { Badge } from '@/components/ui/Badge'
 interface OllamaStatus {
   connected: boolean
   models: string[]
+  default_model_available: boolean
+  embedding_model_available: boolean
 }
+
+const DEFAULT_MODEL = 'qwen2.5-coder:7b'
+const EMBEDDING_MODEL = 'nomic-embed-text'
 
 export function SettingsPanel() {
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null)
@@ -15,7 +20,14 @@ export function SettingsPanel() {
   useEffect(() => {
     api.ollama.status()
       .then(setOllamaStatus)
-      .catch(() => setOllamaStatus({ connected: false, models: [] }))
+      .catch(() =>
+        setOllamaStatus({
+          connected: false,
+          models: [],
+          default_model_available: false,
+          embedding_model_available: false,
+        })
+      )
       .finally(() => setLoading(false))
   }, [])
 
@@ -60,12 +72,30 @@ export function SettingsPanel() {
             </p>
           </div>
         )}
+        {!loading && ollamaStatus?.connected && !ollamaStatus.default_model_available && (
+          <div className="rounded-lg bg-amber-500/8 border border-amber-500/15 p-2">
+            <p className="text-[11px] text-amber-400">
+              {DEFAULT_MODEL} isn't pulled — code generation will fail. Run{' '}
+              <code className="font-mono bg-amber-500/10 px-1 rounded">ollama pull {DEFAULT_MODEL}</code>
+            </p>
+          </div>
+        )}
+        {!loading && ollamaStatus?.connected && !ollamaStatus.embedding_model_available && (
+          <div className="rounded-lg bg-amber-500/8 border border-amber-500/15 p-2">
+            <p className="text-[11px] text-amber-400">
+              {EMBEDDING_MODEL} isn't pulled — semantic search will fall back to keyword-only. Run{' '}
+              <code className="font-mono bg-amber-500/10 px-1 rounded">ollama pull {EMBEDDING_MODEL}</code>
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="rounded-xl border border-border-subtle bg-surface-3 p-3 space-y-2">
         <span className="text-xs font-semibold text-text-secondary">Default Model</span>
         <div className="flex items-center gap-2">
-          <Badge variant="accent" dot>qwen2.5-coder:7b</Badge>
+          <Badge variant={ollamaStatus?.default_model_available ? 'accent' : 'default'} dot>
+            {DEFAULT_MODEL}
+          </Badge>
         </div>
         <p className="text-[11px] text-text-muted">
           All AI capabilities route through Ollama via the LLM abstraction layer.
