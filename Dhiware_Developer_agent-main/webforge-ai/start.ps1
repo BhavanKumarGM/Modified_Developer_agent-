@@ -5,7 +5,7 @@ Write-Host "Starting WebForge AI..." -ForegroundColor Cyan
 # This app has no authentication; do not change HOST to 0.0.0.0 unless you
 # understand that exposes it, unauthenticated, to your whole network.
 Start-Process powershell -ArgumentList "-NoExit", "-Command", `
-  "cd '$PSScriptRoot\backend'; python -m app.main" `
+  "cd '$PSScriptRoot\backend'; venv\Scripts\python -m app.main" `
   -WindowStyle Normal
 
 Start-Sleep -Seconds 2
